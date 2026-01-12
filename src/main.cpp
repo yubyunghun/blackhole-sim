@@ -171,7 +171,8 @@ static const char* CS_GEOD = R"(
 layout(local_size_x=16, local_size_y=16) in;
 
 // Output image
-layout(binding=0, rgba8) writeonly uniform image2D outImage;
+// HDR output (values may exceed 1); tone mapping + bloom happen afterwards
+layout(binding=0, rgba16f) writeonly uniform image2D outImage;
 
 // Camera UBO: std140-safe packing
 layout(std140, binding=1) uniform Camera {
@@ -185,7 +186,7 @@ layout(std140, binding=1) uniform Camera {
 
 // Disk UBO
 layout(std140, binding=2) uniform Disk {
-    vec4 disk; // x=r1, y=r2 (metres), z=rs (metres), w=unused
+    vec4 disk; // x=r1, y=r2 (metres), z=rs (metres), w=time (seconds)
 };
 
 // Objects UBO (masses packed into 4 vec4s => up to 16 masses)
@@ -298,7 +299,50 @@ vec3 blackbody(float T){                // Kelvin -> rgb (Tanner Helland fit)
     return clamp(c, 0.0, 1.0);
 }
 
-vec4 diskColorRelativistic(vec3 pc, vec3 rayDir, float r1, float r2, float rCam){
+// ---------------------------------------------------------------------------
+// Gas texture: 3D value-noise fBm sampled in polar coords, so features are
+// stretched along the orbit (streaks) and tile seamlessly around the ring.
+// ---------------------------------------------------------------------------
+float vnoise(vec3 p){
+    vec3 i = floor(p), f = fract(p);
+    f = f*f*(3.0 - 2.0*f);
+    return mix(mix(mix(hash13(i+vec3(0,0,0)), hash13(i+vec3(1,0,0)), f.x),
+                   mix(hash13(i+vec3(0,1,0)), hash13(i+vec3(1,1,0)), f.x), f.y),
+               mix(mix(hash13(i+vec3(0,0,1)), hash13(i+vec3(1,0,1)), f.x),
+                   mix(hash13(i+vec3(0,1,1)), hash13(i+vec3(1,1,1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p){
+    float s = 0.0, a = 0.5;
+    for (int i = 0; i < 5; ++i) { s += a * vnoise(p); p = p * 2.03 + 11.7; a *= 0.5; }
+    return s;
+}
+float gasAt(float r, float phi){
+    // ring radius 2.6 -> clumps around the orbit; r*4 -> finer radial banding
+    vec3 q = vec3(cos(phi) * 2.6, sin(phi) * 2.6, r * 4.0);
+    return fbm(q);
+}
+
+// Differential (Keplerian-like) rotation: omega ~ r^-1.5, inner gas laps outer.
+// Shear would wind the pattern into ever-tighter spirals, so we use the
+// flow-map trick: two copies with staggered resets, cross-faded so each one
+// resets while invisible.
+const float SPIN = 4.0;      // angular speed scale (rad/s at r = 1 rs)
+const float FLOW_P = 4.0;    // seconds per flow cycle
+float gasDensity(float r, float phi, float t){
+    float omega = SPIN * pow(r, -1.5);
+    float tA = mod(t, FLOW_P);
+    float tB = mod(t + 0.5*FLOW_P, FLOW_P);
+    float wA = 1.0 - abs(2.0*tA/FLOW_P - 1.0);
+    // gas moves toward decreasing phi (matches Doppler velocity), so sample
+    // where the material was: phi + omega*t
+    float nA = gasAt(r, phi + omega*tA);
+    float nB = gasAt(r + 0.37, phi + omega*tB + 1.3);   // decorrelate the 2 copies
+    float n = mix(nB, nA, wA);
+    // contrast: dark lanes and bright filaments
+    return smoothstep(0.30, 0.75, n);
+}
+
+vec4 diskColorRelativistic(vec3 pc, vec3 rayDir, float r1, float r2, float rCam, float t){
     float r = length(pc.xz);
     // orbital velocity: counter-clockwise seen from +y
     vec3 vdir = normalize(cross(vec3(0,1,0), vec3(pc.x, 0.0, pc.z)));
@@ -313,8 +357,9 @@ vec4 diskColorRelativistic(vec3 pc, vec3 rayDir, float r1, float r2, float rCam)
     float T = 4500.0 * pow(r / r1, -0.75);
     vec3 col = blackbody(T * g);
 
-    float I = pow(g, 4.0) * pow(r1 / r, 1.5);
-    vec3 c = 1.0 - exp(-col * I * 3.0);           // tone map into [0,1)
+    float gas = gasDensity(r, atan(pc.z, pc.x), t);
+    float I = pow(g, 4.0) * pow(r1 / r, 1.5) * (0.25 + 1.6 * gas);
+    vec3 c = col * I * 1.5;                       // linear HDR; tone mapped later
     // opaque disk with soft inner/outer edges (premultiplied alpha)
     float edge = smoothstep(r2, r2 - 0.6, r) * smoothstep(r1, r1 + 0.15, r);
     return vec4(c * edge, edge);
@@ -378,7 +423,7 @@ void main(){
         if (hit == 1) {
             vec3 pc = mix(p0, p1, bestT);
             if (realDisk) {
-                color = diskColorRelativistic(pc, v, r1, r2, rCam);
+                color = diskColorRelativistic(pc, v, r1, r2, rCam, disk.w);
             } else {
                 float ro = length(pc.xz) / r2;
                 color = vec4(vec3(1.0, ro, 0.2) * ro, ro);  // reference look (premultiplied)
@@ -543,7 +588,10 @@ static void uploadCameraUBO(){
 struct DiskUBO { vec4 disk; }; // r1, r2, rs, -
 static void uploadDiskUBO(){
     DiskUBO d{};
-    d.disk = vec4(float(SAG_RS*2.2), float(SAG_RS*5.2), float(SAG_RS), 0.0f);
+    // w = animation time; wrapped so float precision stays good in long sessions
+    // (wrap period is a multiple of the 4 s flow cycle, so it's seamless for the flow)
+    float t = float(std::fmod(glfwGetTime(), 4000.0));
+    d.disk = vec4(float(SAG_RS*2.2), float(SAG_RS*5.2), float(SAG_RS), t);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBODisk);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DiskUBO), &d);
 }
@@ -581,7 +629,7 @@ static void dispatchCompute(){
     static int texW = 0, texH = 0;
     glBindTexture(GL_TEXTURE_2D, gTexOut);
     if (cw != texW || ch != texH) {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cw, ch, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, cw, ch, 0, GL_RGBA, GL_FLOAT, nullptr);
         texW = cw; texH = ch;
     }
 
@@ -592,7 +640,7 @@ static void dispatchCompute(){
     glBindBufferBase(GL_UNIFORM_BUFFER, 3, gUBOObjs);
 
     // bind image
-    glBindImageTexture(0, gTexOut, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
+    glBindImageTexture(0, gTexOut, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
 
     GLuint gx = (GLuint) ((cw + 15) / 16);
     GLuint gy = (GLuint) ((ch + 15) / 16);
@@ -600,17 +648,142 @@ static void dispatchCompute(){
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 }
 
+// ---------- Post-processing: bloom + tone mapping ----------
+// HDR image -> bright pass (half res) -> separable Gaussian blur at two
+// sizes (half and quarter res) -> composite: tonemap(hdr + bloom), blended
+// over the grid. Bloom has alpha 0, so its glow adds on top of grid/stars.
+static const char* FS_BRIGHT = R"(
+#version 330 core
+in vec2 vUV; out vec4 o;
+uniform sampler2D uTex; uniform float uThreshold;
+void main(){
+    vec3 c = texture(uTex, vUV).rgb;
+    float l = max(c.r, max(c.g, c.b));
+    // soft threshold: keep only the part of the brightness above uThreshold
+    o = vec4(c * (max(l - uThreshold, 0.0) / max(l, 1e-4)), 1.0);
+}
+)";
+static const char* FS_BLUR = R"(
+#version 330 core
+in vec2 vUV; out vec4 o;
+uniform sampler2D uTex; uniform vec2 uStep;   // one texel along the blur axis
+void main(){
+    const float w[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec3 s = texture(uTex, vUV).rgb * w[0];
+    for (int i = 1; i < 5; ++i){
+        s += texture(uTex, vUV + uStep * float(i)).rgb * w[i];
+        s += texture(uTex, vUV - uStep * float(i)).rgb * w[i];
+    }
+    o = vec4(s, 1.0);
+}
+)";
+static const char* FS_COMPOSITE = R"(
+#version 330 core
+in vec2 vUV; out vec4 o;
+uniform sampler2D uHDR, uBloomA, uBloomB;
+uniform float uBloom;      // bloom strength (0 = off)
+uniform int   uTonemap;    // 1 = ACES tone map, 0 = plain clamp (reference look)
+uniform float uExposure;
+vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03)) / (x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
+void main(){
+    vec4 h = texture(uHDR, vUV);
+    vec3 b = texture(uBloomA, vUV).rgb * 0.6 + texture(uBloomB, vUV).rgb * 0.9;
+    vec3 c = h.rgb + b * uBloom;
+    if (uTonemap == 1) c = aces(c * uExposure);
+    o = vec4(c, h.a);        // premultiplied: glow (alpha 0) adds over the grid
+}
+)";
+
+static GLuint gProgBright = 0, gProgBlur = 0, gProgComposite = 0;
+struct RT { GLuint fbo = 0, tex = 0; int w = 0, h = 0; };
+static RT gBloomA1, gBloomA2, gBloomB1, gBloomB2;   // A: half res, B: quarter res
+static bool  gBloom = true;          // L key
+static float gBloomStrength = 0.9f;
+static float gExposure = 1.0f;
+
+static void makeRT(RT& rt, int w, int h){
+    rt.w = w; rt.h = h;
+    glGenTextures(1, &rt.tex);
+    glBindTexture(GL_TEXTURE_2D, rt.tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &rt.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) die("bloom FBO incomplete");
+    glClearColor(0,0,0,0);
+    glClear(GL_COLOR_BUFFER_BIT);   // start black, not undefined (avoids NaN when bloom is off)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+static void initBloom(){
+    gProgBright    = makeProg(VS_BLIT, FS_BRIGHT);
+    gProgBlur      = makeProg(VS_BLIT, FS_BLUR);
+    gProgComposite = makeProg(VS_BLIT, FS_COMPOSITE);
+    makeRT(gBloomA1, gWinW/2, gWinH/2); makeRT(gBloomA2, gWinW/2, gWinH/2);
+    makeRT(gBloomB1, gWinW/4, gWinH/4); makeRT(gBloomB2, gWinW/4, gWinH/4);
+}
+
+// draw a fullscreen pass sampling `src` into `dst`
+static void pass(GLuint prog, GLuint src, const RT& dst){
+    glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo);
+    glViewport(0, 0, dst.w, dst.h);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glUniform1i(glGetUniformLocation(prog, "uTex"), 0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+static void blur(RT& a, RT& tmp, int iterations){
+    for (int i = 0; i < iterations; ++i){
+        glUseProgram(gProgBlur);
+        glUniform2f(glGetUniformLocation(gProgBlur, "uStep"), 1.0f / a.w, 0.0f);
+        pass(gProgBlur, a.tex, tmp);
+        glUniform2f(glGetUniformLocation(gProgBlur, "uStep"), 0.0f, 1.0f / a.h);
+        pass(gProgBlur, tmp.tex, a);
+    }
+}
+
+// Runs the bloom passes into offscreen targets (call before drawing the grid)
+static void runBloom(){
+    if (!gBloom) return;
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glBindVertexArray(gVAOQuad);
+
+    glUseProgram(gProgBright);
+    glUniform1f(glGetUniformLocation(gProgBright, "uThreshold"), 0.8f);
+    pass(gProgBright, gTexOut, gBloomA1);    // bright pass, downsample to 1/2
+    blur(gBloomA1, gBloomA2, 2);             // tight glow
+    pass(gProgBlit, gBloomA1.tex, gBloomB1); // downsample to 1/4
+    blur(gBloomB1, gBloomB2, 3);             // wide haze
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, gWinW, gWinH);
+    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
+}
+
 // ---------- Draw ----------
 static void drawQuad(){
-    glUseProgram(gProgBlit);
+    glUseProgram(gProgComposite);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gTexOut);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gBloomA1.tex);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gBloomB1.tex);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, gTexOut);
-    glUniform1i(glGetUniformLocation(gProgBlit,"uTex"), 0);
+    glUniform1i(glGetUniformLocation(gProgComposite,"uHDR"), 0);
+    glUniform1i(glGetUniformLocation(gProgComposite,"uBloomA"), 1);
+    glUniform1i(glGetUniformLocation(gProgComposite,"uBloomB"), 2);
+    glUniform1f(glGetUniformLocation(gProgComposite,"uBloom"), gBloom ? gBloomStrength : 0.0f);
+    glUniform1i(glGetUniformLocation(gProgComposite,"uTonemap"), gRealDisk ? 1 : 0);
+    glUniform1f(glGetUniformLocation(gProgComposite,"uExposure"), gExposure);
     glBindVertexArray(gVAOQuad);
     glDisable(GL_DEPTH_TEST);
     // Blend the ray-traced image over the grid: empty space (alpha 0) lets the
-    // warped grid show through, like the reference. The shader outputs
-    // premultiplied colour, so faint stars aren't darkened twice.
+    // warped grid show through, like the reference. Colours are premultiplied,
+    // so faint stars aren't darkened twice and bloom adds as pure glow.
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -664,6 +837,10 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
     if(action==GLFW_PRESS && key==GLFW_KEY_D){
         gRealDisk = !gRealDisk;
         std::cout << "[INFO] Disk: " << (gRealDisk ? "relativistic" : "reference (flat)") << std::endl;
+    }
+    if(action==GLFW_PRESS && key==GLFW_KEY_L){
+        gBloom = !gBloom;
+        std::cout << "[INFO] Bloom " << (gBloom ? "ON" : "OFF") << std::endl;
     }
     if(action==GLFW_PRESS && key==GLFW_KEY_B){
         gShowStars = !gShowStars;
@@ -783,6 +960,7 @@ static void initGL(){
     gProgComp = makeComp(CS_GEOD);
 
     createQuad();
+    initBloom();
     generateGrid();
 
     glGenBuffers(1,&gUBOCamera);
@@ -811,6 +989,7 @@ int main(int argc, char** argv){
         } else if(a == "--gravity")  gGravity = true;
         else if(a == "--flat-disk")  gRealDisk = false;
         else if(a == "--no-stars")   gShowStars = false;
+        else if(a == "--no-bloom")   gBloom = false;
     }
 
     initGL();
@@ -848,6 +1027,7 @@ int main(int argc, char** argv){
 
         // compute
         dispatchCompute();
+        runBloom();
 
         // scene grid (for depth feel)
         vec3 camPos = gCam.position();
