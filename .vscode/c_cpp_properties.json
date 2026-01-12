@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "MSVC-x64",
+      "includePath": [
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/third_party/glad/include",
+        "${workspaceFolder}/third_party/glfw/include",
+        "${workspaceFolder}/third_party/glm",
+        "${workspaceFolder}/third_party/stb"
+      ],
+      "defines": [
+        "_CRT_SECURE_NO_WARNINGS",
+        "GLFW_INCLUDE_NONE"
+      ],
+      "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35216/bin/Hostx64/x64/cl.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-msvc-x64",
+      "windowsSdkVersion": "10.0.19041.0"
+    }
+  ]
+}

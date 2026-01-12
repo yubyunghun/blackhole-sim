@@ -1,0 +1,16 @@
+# Build outputs
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+# ...but keep the prebuilt GLFW libraries the build links against
+!third_party/glfw/lib-vc2022/*.lib
+
+# Keep the GLFW runtime DLL so main.exe runs after building; ignore others
+*.dll
+!glfw3.dll
+
+# Screenshots saved with the P key / --screenshot
+*.bmp
