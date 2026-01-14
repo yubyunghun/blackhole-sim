@@ -25,7 +25,9 @@ relativistic effects.
 - **Animated gas.** A procedural texture with differential rotation: inner
   rings orbit faster than outer ones.
 - **HDR bloom and ACES tone mapping.**
-- **Warped spacetime grid** that visualises the curvature around each mass.
+- **Ray-traced spacetime grid.** The black hole's embedding diagram (Flamm's
+  paraboloid) is drawn as a grid that light rays actually hit, so it is
+  lensed, wraps around the shadow, and is hidden behind the hole.
 - **N-body gravity.** Stars fall toward the hole and are swallowed at the
   event horizon.
 - **Reference mode** (press `D`) that reproduces the flat orange disk from the
@@ -41,6 +43,7 @@ relativistic effects.
 | `D` | Relativistic disk ↔ reference flat disk |
 | `B` | Starfield on/off |
 | `L` | Bloom on/off |
+| `T` | Grid: ray traced → off → flat overlay (reference) |
 | `P` | Save a screenshot (`screenshot_<time>.bmp`) |
 | `Esc` | Quit |
 
@@ -71,7 +74,8 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ### Command-line options
 
 ```
-main.exe [--screenshot out.bmp [frames]] [--gravity] [--flat-disk] [--no-stars] [--no-bloom]
+main.exe [--screenshot out.bmp [frames]] [--gravity] [--flat-disk] [--no-stars]
+         [--no-bloom] [--grid ray|off|overlay]
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
@@ -92,6 +96,9 @@ Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
 3. **Hits.** Each step is tested against the disk plane (interpolated to the
    exact crossing point), the stars (segment–sphere test), and the event
    horizon. Rays that escape sample the starfield in their final direction.
+   The grid surface `y = y₀ + 2·√(rs·(d − rs))` is tested on every step too.
+   Grid lines are blended in front to back and the ray keeps going, so
+   whatever lies behind still shows through the gaps.
 4. **Disk shading.** `g = Doppler × gravitational` shift. Observed intensity
    scales as `g⁴` and observed temperature as `g · T`.
 5. **Post-processing.** The HDR image goes through a bright pass, a two-scale

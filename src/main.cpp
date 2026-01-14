@@ -74,6 +74,10 @@ static bool  gGravity = false;
 static bool  gScreenshotRequested = false;   // set by the P key
 static bool  gRealDisk  = true;   // D: relativistic (Doppler/redshift) disk vs reference flat disk
 static bool  gShowStars = true;   // B: lensed starfield background
+// T: spacetime grid mode. 1 = ray traced (lensed, occluded), 0 = off,
+// 2 = flat overlay drawn behind the image (the reference's original method)
+static int   gGridMode = 1;
+static const char* kGridModeNames[] = { "off", "ray traced", "flat overlay (reference)" };
 
 // ---------- Camera ----------
 struct Camera {
@@ -365,11 +369,32 @@ vec4 diskColorRelativistic(vec3 pc, vec3 rayDir, float r1, float r2, float rCam,
     return vec4(c * edge, edge);
 }
 
+// ---------------------------------------------------------------------------
+// Ray-traced spacetime grid: Flamm's paraboloid, the embedding diagram of the
+// Schwarzschild geometry:  y(d) = Y0 + 2*sqrt(rs*(d - rs)),  d = horizontal
+// distance from the hole. Light rays hit it like any other surface, so the
+// grid is lensed, wraps around the shadow, and is hidden behind the hole.
+// Only the lines are drawn; rays pass through the gaps and continue.
+// ---------------------------------------------------------------------------
+const float GRID_SPACING_M = 1e10;   // line spacing (metres), same as the old CPU grid
+const float GRID_HALF      = 13.0;   // half-extent in cells
+const float GRID_Y0_M      = -9e10;  // height of the funnel's throat (metres)
+const float GRID_LINE_PX   = 1.1;    // line width in pixels
+const vec3  GRID_COLOR     = vec3(0.5);
+const float GRID_ALPHA     = 0.7;
+
+// signed height above the surface (rs units, rs = 1)
+float gridF(vec3 p, float y0){
+    float d = max(length(p.xz), 1.0);
+    return p.y - (y0 + 2.0 * sqrt(d - 1.0));
+}
+
 void main(){
     int WIDTH  = CAM.ires.x;
     int HEIGHT = CAM.ires.y;
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     if (pix.x >= WIDTH || pix.y >= HEIGHT) return;
+    bool rtGrid = CAM.ires.z == 1;
 
     int flags = int(CAM.params.w + 0.5);
     bool realDisk = (flags & 1) != 0;
@@ -388,8 +413,17 @@ void main(){
     vec3 hv = cross(x, v);
     H2 = dot(hv, hv);
 
-    vec4 color = vec4(0);           // default: escaped -> transparent (grid shows)
+    vec4 color = vec4(0);           // what the ray finally hits (premultiplied)
+    vec4 front = vec4(0);           // grid lines crossed on the way (front-to-back)
     bool done = false;
+
+    float gS   = GRID_SPACING_M / RS;
+    float gY0  = GRID_Y0_M / RS;
+    float gExt = GRID_HALF * gS;
+    float pixAngle = 2.0 * CAM.params.x / float(HEIGHT);   // radians per pixel
+    float travel = 0.0;                                     // distance along the ray
+    // highest point of the grid (its corners): steps entirely above it skip the test
+    float gTop = gY0 + 2.0 * sqrt(1.4143 * gExt - 1.0);
 
     for (int i = 0; i < MAX_STEPS && !done; ++i){
         float r = length(x);
@@ -397,6 +431,7 @@ void main(){
         vec3 p0 = x;
         rk4(x, v, h);
         vec3 p1 = x;
+        float segLen = length(p1 - p0);
 
         // --- earliest event along this step ---
         float bestT = 2.0;
@@ -419,6 +454,31 @@ void main(){
             float R = objPosRadius[k].w   / RS;
             if (segSphere(p0, p1, c, R, t) && t < bestT) { bestT = t; hit = 2; hitObj = k; }
         }
+
+        // grid surface: only counts if it's in front of whatever else this step hit
+        // cheap bounding-box rejection first: above the top, below the throat,
+        // or outside the square footprint on the same side
+        bool nearGrid = min(p0.y, p1.y) <= gTop && max(p0.y, p1.y) >= gY0 &&
+                        !(p0.x >  gExt && p1.x >  gExt) && !(p0.x < -gExt && p1.x < -gExt) &&
+                        !(p0.z >  gExt && p1.z >  gExt) && !(p0.z < -gExt && p1.z < -gExt);
+        if (rtGrid && nearGrid && front.a < 0.99) {
+            float f0 = gridF(p0, gY0), f1 = gridF(p1, gY0);
+            if (f0 * f1 < 0.0) {
+                float t = f0 / (f0 - f1);
+                vec3 P = mix(p0, p1, t);
+                if (t < bestT && length(P.xz) >= 1.0 &&
+                    abs(P.x) <= gExt && abs(P.z) <= gExt) {
+                    // distance to the nearest grid line, and line width at this distance
+                    vec2 g = abs(fract(P.xz / gS + 0.5) - 0.5) * gS;
+                    float dl = min(g.x, g.y);
+                    float w  = GRID_LINE_PX * pixAngle * (travel + t * segLen);
+                    float cov = 1.0 - smoothstep(0.0, w, dl);
+                    float a = GRID_ALPHA * cov;
+                    front += (1.0 - front.a) * vec4(GRID_COLOR * a, a);
+                }
+            }
+        }
+        travel += segLen;
 
         if (hit == 1) {
             vec3 pc = mix(p0, p1, bestT);
@@ -452,6 +512,8 @@ void main(){
     }
     if (!done) color = vec4(0,0,0,1);         // trapped near photon sphere
 
+    // grid lines in front, everything else behind (premultiplied "over")
+    color = front + (1.0 - front.a) * color;
     imageStore(outImage, pix, color);
 }
 )";
@@ -579,7 +641,7 @@ static void uploadCameraUBO(){
 
     int cw = gCam.moving ? gMovingW : gStillW;
     int ch = gCam.moving ? gMovingH : gStillH;
-    data.ires = ivec4(cw, ch, 0, 0);
+    data.ires = ivec4(cw, ch, gGridMode, 0);   // z = grid mode (1 = ray traced)
 
     glBindBuffer(GL_UNIFORM_BUFFER, gUBOCamera);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CamUBO), &data);
@@ -838,6 +900,10 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
         gRealDisk = !gRealDisk;
         std::cout << "[INFO] Disk: " << (gRealDisk ? "relativistic" : "reference (flat)") << std::endl;
     }
+    if(action==GLFW_PRESS && key==GLFW_KEY_T){
+        gGridMode = (gGridMode == 1) ? 0 : (gGridMode == 0 ? 2 : 1);   // ray traced -> off -> overlay
+        std::cout << "[INFO] Grid: " << kGridModeNames[gGridMode] << std::endl;
+    }
     if(action==GLFW_PRESS && key==GLFW_KEY_L){
         gBloom = !gBloom;
         std::cout << "[INFO] Bloom " << (gBloom ? "ON" : "OFF") << std::endl;
@@ -990,6 +1056,10 @@ int main(int argc, char** argv){
         else if(a == "--flat-disk")  gRealDisk = false;
         else if(a == "--no-stars")   gShowStars = false;
         else if(a == "--no-bloom")   gBloom = false;
+        else if(a == "--grid" && i+1 < argc) {
+            std::string m = argv[++i];
+            gGridMode = (m == "off") ? 0 : (m == "overlay" ? 2 : 1);
+        }
     }
 
     initGL();
@@ -1018,7 +1088,7 @@ int main(int argc, char** argv){
 
         // physics + rebuild warped grid (objects may have moved)
         stepGravity(dt);
-        generateGrid();
+        if (gGridMode == 2) generateGrid();
 
         // upload UBOs
         uploadCameraUBO();
@@ -1034,7 +1104,7 @@ int main(int argc, char** argv){
         mat4 V = lookAt(camPos, gCam.target, vec3(0,1,0));
         // 60deg FOV to match the ray tracer's tanHalfFov, so grid and image line up
         mat4 P = perspective(radians(60.0f), float(gWinW)/float(gWinH), 1e9f, 1e14f);
-        drawGrid(P*V);
+        if (gGridMode == 2) drawGrid(P*V);   // modes 0/1: grid is off or inside the ray tracer
 
         // blit
         drawQuad();
