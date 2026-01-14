@@ -77,6 +77,8 @@ static bool  gShowStars = true;   // B: lensed starfield background
 // T: spacetime grid mode. 1 = ray traced (lensed, occluded), 0 = off,
 // 2 = flat overlay drawn behind the image (the reference's original method)
 static int   gGridMode = 1;
+// [ / ]: black hole spin chi = a/M (0 = Schwarzschild, ->1 = maximally spinning)
+static double gSpin = 0.9;
 static const char* kGridModeNames[] = { "off", "ray traced", "flat overlay (reference)" };
 
 // ---------- Camera ----------
@@ -191,6 +193,7 @@ layout(std140, binding=1) uniform Camera {
 // Disk UBO
 layout(std140, binding=2) uniform Disk {
     vec4 disk; // x=r1, y=r2 (metres), z=rs (metres), w=time (seconds)
+    vec4 kerr; // x=a (spin parameter, rs units, 0..0.5), y=r+ (horizon, rs units)
 };
 
 // Objects UBO (masses packed into 4 vec4s => up to 16 masses)
@@ -202,38 +205,116 @@ layout(std140, binding=3) uniform Objects {
 };
 
 // ---------------------------------------------------------------------------
-// Null geodesics in Schwarzschild spacetime, integrated in Cartesian coords.
+// Null geodesics in Kerr spacetime (rotating black hole), Kerr-Schild form.
 //
-// For a photon, the spatial path obeys (Binet form, exact in GR):
-//     d2x/dl2 = -1.5 * rs * h^2 * x / r^5,   h = |x cross dx/dl| (conserved)
-// Same trajectories as the spherical-coordinate geodesic equations, but with
-// no coordinate singularity at the poles and an easy RK4.
+// Kerr-Schild coordinates are Cartesian and regular across the horizon:
+//     g_uv = eta_uv + f k_u k_v
+//     f = 2 M r^3 / (r^4 + a^2 z^2)
+//     k = ( (r x + a y)/(r^2 + a^2), (r y - a x)/(r^2 + a^2), z / r ),  k_t = 1
+// where r is the Boyer-Lindquist radius, found from
+//     r^4 - (R^2 - a^2) r^2 - a^2 z^2 = 0,   R^2 = x^2 + y^2 + z^2.
+// The inverse metric is just eta - f k k, so the photon Hamiltonian is
+//     H = 1/2 ( -1 + |p|^2 - f S^2 ),   S = 1 + k.p   (p_t = -1)
+// and Hamilton's equations give
+//     dx/dl =  dH/dp = p - f S k
+//     dp/dl = -dH/dx = 1/2 ( S^2 grad f + 2 f S grad S )
+// with grad r, grad f, grad S written out analytically below.
 //
-// Everything below works in units of rs (rs == 1) so r^5 never overflows
-// 32-bit floats (in metres r^5 ~ 1e55 > FLT_MAX).
+// With a = 0 this is Schwarzschild in Eddington-Finkelstein coordinates,
+// whose spatial coordinates are the Schwarzschild ones, so the image is
+// identical to the old Binet-equation tracer.
+//
+// Conventions:
+//  - units of rs (rs = 2M = 1, so M = 0.5) to keep r^4 etc. in float range
+//  - "local" coords have the spin axis along +Z; world has it along +y:
+//        local = world.zxy,   world = local.yzx   (cyclic, so right-handed)
+//  - We trace from the camera backwards in time. Kerr with spin +a run
+//    backwards in time is Kerr with spin -a run forwards, so we integrate
+//    with A = -a. (This also keeps ingoing Kerr-Schild regular at the
+//    horizon for the rays we trace.)
 // ---------------------------------------------------------------------------
 
-const float STEP_FRAC = 0.02;   // step = 2% of current radius (adaptive)
-const float ESCAPE_R  = 2000.0; // rs units (~2.5e13 m, well beyond the scene)
+const float STEP_FRAC = 0.02;   // step = 2% of current radius near the hole...
+const float STEP_FAR  = 0.08;   // ...growing to 8% far away, where paths are nearly straight
+// Stop outgoing rays here and use their direction for the sky. Everything in
+// the scene (stars at ~31 rs, grid within ~15 rs) is inside this, and the
+// bending left beyond it is < 1 degree.
+const float ESCAPE_R  = 80.0;
 const int   MAX_STEPS = 3000;   // rays still bound after this are captured
+const float MASS      = 0.5;    // M in units of rs
 
 float RS;      // Schwarzschild radius in metres (from Disk UBO)
-float H2;      // conserved h^2 for the current ray
+float A;       // spin parameter used for integration (= -a, see above)
 
-vec3 accel(vec3 x){
-    float r2 = dot(x,x);
-    float r5 = r2*r2*sqrt(r2);
-    return -1.5 * H2 * x / r5;
+// Boyer-Lindquist r at a Kerr-Schild point
+float ksR(vec3 x){
+    float a2 = A*A;
+    float w = dot(x,x) - a2;
+    return sqrt(0.5 * (w + sqrt(w*w + 4.0*a2*x.z*x.z)));
+}
+// metric function f (depends only on a^2)
+float ksF(vec3 x){
+    float r = ksR(x), r2 = r*r;
+    return 2.0*MASS*r2*r / (r2*r2 + A*A*x.z*x.z);
+}
+vec3 ksK(vec3 x, float r){
+    float P = r*r + A*A;
+    return vec3((r*x.x + A*x.y)/P, (r*x.y - A*x.x)/P, x.z/r);
 }
 
-// Classic 4-stage Runge-Kutta on (x, v)
-void rk4(inout vec3 x, inout vec3 v, float h){
-    vec3 k1x = v;              vec3 k1v = accel(x);
-    vec3 k2x = v + 0.5*h*k1v;  vec3 k2v = accel(x + 0.5*h*k1x);
-    vec3 k3x = v + 0.5*h*k2v;  vec3 k3v = accel(x + 0.5*h*k2x);
-    vec3 k4x = v + h*k3v;      vec3 k4v = accel(x + h*k3x);
+void kerrRHS(vec3 x, vec3 p, out vec3 dx, out vec3 dp){
+    float a2 = A*A;
+    float R2 = dot(x,x);
+    float w  = R2 - a2;
+    float r2 = 0.5 * (w + sqrt(w*w + 4.0*a2*x.z*x.z));
+    float r  = sqrt(r2);
+    float P  = r2 + a2;
+    float Q  = r2*r2 + a2*x.z*x.z;
+    float f  = 2.0*MASS*r2*r / Q;
+    vec3  k  = vec3((r*x.x + A*x.y)/P, (r*x.y - A*x.x)/P, x.z/r);
+    float S  = 1.0 + dot(k, p);
+
+    dx = p - f*S*k;
+
+    // grad r (implicit differentiation of the quartic)
+    float den = 2.0*r2 - R2 + a2;
+    vec3 gr = vec3(x.x*r, x.y*r, x.z*(r2 + a2)/r) / den;
+    // grad f
+    vec3 gQ = 4.0*r2*r*gr + vec3(0.0, 0.0, 2.0*a2*x.z);
+    vec3 gf = 2.0*MASS * (3.0*r2*Q*gr - r2*r*gQ) / (Q*Q);
+    // grad S = sum_j p_j grad k_j
+    float c = (p.x*x.x + p.y*x.y)/P
+            - 2.0*r*(p.x*(r*x.x + A*x.y) + p.y*(r*x.y - A*x.x))/(P*P)
+            - p.z*x.z/r2;
+    vec3 gS = c*gr + vec3((r*p.x - A*p.y)/P, (A*p.x + r*p.y)/P, p.z/r);
+
+    dp = 0.5 * (S*S*gf + 2.0*f*S*gS);
+}
+
+// Classic 4-stage Runge-Kutta on (x, p)
+void rk4(inout vec3 x, inout vec3 p, float h){
+    vec3 k1x, k1p, k2x, k2p, k3x, k3p, k4x, k4p;
+    kerrRHS(x,             p,             k1x, k1p);
+    kerrRHS(x + 0.5*h*k1x, p + 0.5*h*k1p, k2x, k2p);
+    kerrRHS(x + 0.5*h*k2x, p + 0.5*h*k2p, k3x, k3p);
+    kerrRHS(x + h*k3x,     p + h*k3p,     k4x, k4p);
     x += h/6.0 * (k1x + 2.0*k2x + 2.0*k3x + k4x);
-    v += h/6.0 * (k1v + 2.0*k2v + 2.0*k3v + k4v);
+    p += h/6.0 * (k1p + 2.0*k2p + 2.0*k3p + k4p);
+}
+
+// Initial covariant momentum for a photon whose coordinate velocity points
+// along unit vector d (so the camera's pixel directions are exactly the
+// directions rays leave in, like the old tracer). Solving dx/dl || d and H = 0:
+//     p = beta d + gamma k,  beta = 1/sqrt(1 - f(1 - c^2)),
+//     gamma = f (1 + beta c)/(1 - f),  c = k.d    (k null => |k| = 1)
+vec3 initMomentum(vec3 x, vec3 d){
+    float r = ksR(x);
+    float f = ksF(x);
+    vec3  k = ksK(x, r);
+    float c = dot(k, d);
+    float beta  = 1.0 / sqrt(max(1.0 - f*(1.0 - c*c), 1e-6));
+    float gamma = f * (1.0 + beta*c) / max(1.0 - f, 1e-6);
+    return beta*d + gamma*k;
 }
 
 // First intersection of segment p0->p1 with sphere (c,R); t in [0,1]
@@ -251,6 +332,7 @@ bool segSphere(vec3 p0, vec3 p1, vec3 c, float R, out float t){
     return t <= 1.0;
 }
 
+)" R"(
 // ---------------------------------------------------------------------------
 // Background: procedural starfield + faint galactic band, looked up by the
 // ray's final (escape) direction, so it is lensed for free.
@@ -346,29 +428,45 @@ float gasDensity(float r, float phi, float t){
     return smoothstep(0.30, 0.75, n);
 }
 
-vec4 diskColorRelativistic(vec3 pc, vec3 rayDir, float r1, float r2, float rCam, float t){
-    float r = length(pc.xz);
-    // orbital velocity: counter-clockwise seen from +y
-    vec3 vdir = normalize(cross(vec3(0,1,0), vec3(pc.x, 0.0, pc.z)));
-    float beta = clamp(sqrt(0.5 / (r - 1.0)), 0.0, 0.99);
-    float gamma = 1.0 / sqrt(1.0 - beta*beta);
-    vec3 nPhoton = -normalize(rayDir);          // photon travels from disk to camera
-    float gDopp = 1.0 / (gamma * (1.0 - beta * dot(vdir, nPhoton)));
-    float gGrav = sqrt(1.0 - 1.0/r) / sqrt(1.0 - 1.0/rCam);
-    float g = gDopp * gGrav;
+)" R"(
+// Redshift for gas on a prograde circular (Keplerian) Kerr orbit, seen by a
+// static camera:   g = 1 / ( u^t_cam * u^t (1 - Omega * L) )
+//   Omega = sqrt(M) / (r^1.5 + a sqrt(M))
+//   u^t   = (r^1.5 + a sqrt(M)) / ( r^0.75 sqrt(r^1.5 - 3M sqrt(r) + 2a sqrt(M)) )
+//   L     = photon's angular momentum about the spin axis (energy = 1)
+//   u^t_cam = 1/sqrt(1 - f_cam)   (static observer in Kerr-Schild: g_tt = -1 + f)
+// This one number contains Doppler beaming, frame dragging and gravitational
+// redshift. For a = 0 it reduces to the special-relativistic Doppler factor
+// times sqrt(1 - rs/r) used before.
+float kerrDiskG(float r, float aPhys, float Lphoton, float fCam){
+    float sM  = sqrt(MASS);
+    float r15 = r * sqrt(r);
+    float Om  = sM / (r15 + aPhys*sM);
+    float ut  = (r15 + aPhys*sM) /
+                (pow(r, 0.75) * sqrt(max(r15 - 3.0*MASS*sqrt(r) + 2.0*aPhys*sM, 1e-4)));
+    float uCam = 1.0 / sqrt(max(1.0 - fCam, 1e-4));
+    return 1.0 / (uCam * ut * max(1.0 - Om*Lphoton, 1e-3));
+}
+
+// r: Boyer-Lindquist radius of the hit; pc: hit point (world, rs units)
+vec4 diskColorRelativistic(vec3 pc, float r, float g, float r1, float r2, float t){
 
     // emitted temperature falls off ~ r^-3/4 (thin-disk profile)
-    float T = 4500.0 * pow(r / r1, -0.75);
+    // profiles are anchored at a fixed radius (2.2 rs), not the inner edge, so
+    // spin (which moves the ISCO inward) adds hotter gas instead of dimming the rest
+    const float R_REF = 2.2;
+    float T = 4500.0 * pow(r / R_REF, -0.75);
     vec3 col = blackbody(T * g);
 
     float gas = gasDensity(r, atan(pc.z, pc.x), t);
-    float I = pow(g, 4.0) * pow(r1 / r, 1.5) * (0.25 + 1.6 * gas);
+    float I = pow(g, 4.0) * pow(R_REF / r, 1.5) * (0.25 + 1.6 * gas);
     vec3 c = col * I * 1.5;                       // linear HDR; tone mapped later
     // opaque disk with soft inner/outer edges (premultiplied alpha)
     float edge = smoothstep(r2, r2 - 0.6, r) * smoothstep(r1, r1 + 0.15, r);
     return vec4(c * edge, edge);
 }
 
+)" R"(
 // ---------------------------------------------------------------------------
 // Ray-traced spacetime grid: Flamm's paraboloid, the embedding diagram of the
 // Schwarzschild geometry:  y(d) = Y0 + 2*sqrt(rs*(d - rs)),  d = horizontal
@@ -401,17 +499,27 @@ void main(){
     bool showStars = (flags & 2) != 0;
 
     RS = disk.z;
-    float r1 = disk.x / RS, r2 = disk.y / RS;
+    float r1 = disk.x / RS, r2 = disk.y / RS;   // Boyer-Lindquist radii (rs units)
+    float aPhys = kerr.x;
+    float rPlus = kerr.y;
+    A = -aPhys;                                 // backwards in time == opposite spin
 
     float u = (2.0*(pix.x+0.5)/WIDTH - 1.0) * CAM.params.y * CAM.params.x;
     float v_ = (1.0 - 2.0*(pix.y+0.5)/HEIGHT) * CAM.params.x;
     vec3 dir = normalize(u * CAM.camRight.xyz - v_ * CAM.camUp.xyz + CAM.camFwd.xyz);
 
-    vec3 x = CAM.camPos.xyz / RS;   // position in rs units
-    float rCam = length(x);
-    vec3 v = dir;                   // |v| = 1
-    vec3 hv = cross(x, v);
-    H2 = dot(hv, hv);
+    vec3 x  = CAM.camPos.xyz / RS;  // world position, rs units (used for hit tests)
+    vec3 v  = dir;                  // world direction of travel
+    vec3 xl = x.zxy;                // local Kerr-Schild position (spin axis = Z)
+    float fCam = ksF(xl);
+    if (fCam >= 0.999) {            // camera inside the horizon: nothing to see
+        imageStore(outImage, pix, vec4(0,0,0,1));
+        return;
+    }
+    vec3 pl = initMomentum(xl, dir.zxy);
+    // photon angular momentum about the spin axis (conserved). The traced ray
+    // runs backwards in time, so the physical photon's is the negative.
+    float Lphys = -(xl.x*pl.y - xl.y*pl.x);
 
     vec4 color = vec4(0);           // what the ray finally hits (premultiplied)
     vec4 front = vec4(0);           // grid lines crossed on the way (front-to-back)
@@ -426,12 +534,14 @@ void main(){
     float gTop = gY0 + 2.0 * sqrt(1.4143 * gExt - 1.0);
 
     for (int i = 0; i < MAX_STEPS && !done; ++i){
-        float r = length(x);
-        float h = STEP_FRAC * r;
+        float R = length(x);
+        float h = mix(STEP_FRAC, STEP_FAR, smoothstep(6.0, 30.0, R)) * R;
         vec3 p0 = x;
-        rk4(x, v, h);
+        rk4(xl, pl, h);
+        x = xl.yzx;                       // back to world coords
         vec3 p1 = x;
         float segLen = length(p1 - p0);
+        if (segLen > 0.0) v = (p1 - p0) / segLen;
 
         // --- earliest event along this step ---
         float bestT = 2.0;
@@ -443,7 +553,8 @@ void main(){
         if (p0.y * p1.y < 0.0) {
             float t = p0.y / (p0.y - p1.y);
             vec3 pc = mix(p0, p1, t);
-            float rd = length(pc.xz);
+            // in the equatorial plane, Kerr-Schild R^2 = r^2 + a^2
+            float rd = sqrt(max(dot(pc.xz, pc.xz) - aPhys*aPhys, 0.0));
             if (rd >= r1 && rd <= r2 && t < bestT) { bestT = t; hit = 1; }
         }
 
@@ -482,10 +593,12 @@ void main(){
 
         if (hit == 1) {
             vec3 pc = mix(p0, p1, bestT);
+            float rBL = sqrt(max(dot(pc.xz, pc.xz) - aPhys*aPhys, 0.0));
             if (realDisk) {
-                color = diskColorRelativistic(pc, v, r1, r2, rCam, disk.w);
+                float g = kerrDiskG(rBL, aPhys, Lphys, fCam);
+                color = diskColorRelativistic(pc, rBL, g, r1, r2, disk.w);
             } else {
-                float ro = length(pc.xz) / r2;
+                float ro = rBL / r2;
                 color = vec4(vec3(1.0, ro, 0.2) * ro, ro);  // reference look (premultiplied)
             }
             done = true;
@@ -498,7 +611,7 @@ void main(){
             vec4 oc = objColor[hitObj];
             color = vec4(oc.rgb * (amb + (1.0-amb)*diff), oc.a);
             done = true;
-        } else if (length(x) <= 1.0) {
+        } else if (ksR(xl) <= rPlus) {
             color = vec4(0,0,0,1);            // crossed the event horizon
             done = true;
         } else if (length(x) > ESCAPE_R && dot(x, v) > 0.0) {
@@ -647,13 +760,28 @@ static void uploadCameraUBO(){
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CamUBO), &data);
 }
 
-struct DiskUBO { vec4 disk; }; // r1, r2, rs, -
+// ---------- Kerr helpers (units of M) ----------
+// Prograde innermost stable circular orbit (Bardeen, Press & Teukolsky 1972)
+static double iscoOverM(double chi){
+    double z1 = 1.0 + std::cbrt(1.0 - chi*chi) * (std::cbrt(1.0 + chi) + std::cbrt(1.0 - chi));
+    double z2 = std::sqrt(3.0*chi*chi + z1*z1);
+    return 3.0 + z2 - std::sqrt((3.0 - z1) * (3.0 + z1 + 2.0*z2));
+}
+
+struct DiskUBO { vec4 disk; vec4 kerr; }; // (r1, r2, rs, time), (a, r+, -, -)
 static void uploadDiskUBO(){
     DiskUBO d{};
     // w = animation time; wrapped so float precision stays good in long sessions
     // (wrap period is a multiple of the 4 s flow cycle, so it's seamless for the flow)
     float t = float(std::fmod(glfwGetTime(), 4000.0));
-    d.disk = vec4(float(SAG_RS*2.2), float(SAG_RS*5.2), float(SAG_RS), t);
+    // In rs units M = 0.5. Spin parameter a = chi*M, horizon r+ = M + sqrt(M^2 - a^2).
+    const double M = 0.5;
+    double a     = gSpin * M;
+    double rPlus = M + std::sqrt(M*M - a*a);
+    // Inner edge: the reference's 2.2 rs, or the ISCO if spin pulls it closer
+    double r1 = std::min(2.2, iscoOverM(gSpin) * M);
+    d.disk = vec4(float(SAG_RS*r1), float(SAG_RS*5.2), float(SAG_RS), t);
+    d.kerr = vec4(float(a), float(rPlus), 0.0f, 0.0f);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBODisk);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DiskUBO), &d);
 }
@@ -900,6 +1028,12 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
         gRealDisk = !gRealDisk;
         std::cout << "[INFO] Disk: " << (gRealDisk ? "relativistic" : "reference (flat)") << std::endl;
     }
+    if((action==GLFW_PRESS || action==GLFW_REPEAT) &&
+       (key==GLFW_KEY_LEFT_BRACKET || key==GLFW_KEY_RIGHT_BRACKET)){
+        double step = (key==GLFW_KEY_RIGHT_BRACKET) ? 0.1 : -0.1;
+        gSpin = std::clamp(std::round((gSpin + step) * 10.0) / 10.0, 0.0, 0.99);
+        std::cout << "[INFO] Spin a/M = " << gSpin << std::endl;
+    }
     if(action==GLFW_PRESS && key==GLFW_KEY_T){
         gGridMode = (gGridMode == 1) ? 0 : (gGridMode == 0 ? 2 : 1);   // ray traced -> off -> overlay
         std::cout << "[INFO] Grid: " << kGridModeNames[gGridMode] << std::endl;
@@ -1035,7 +1169,7 @@ static void initGL(){
 
     glGenBuffers(1,&gUBODisk);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBODisk);
-    glBufferData(GL_UNIFORM_BUFFER, sizeof(vec4), nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(DiskUBO), nullptr, GL_DYNAMIC_DRAW);
 
     glGenBuffers(1,&gUBOObjs);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBOObjs);
@@ -1056,6 +1190,7 @@ int main(int argc, char** argv){
         else if(a == "--flat-disk")  gRealDisk = false;
         else if(a == "--no-stars")   gShowStars = false;
         else if(a == "--no-bloom")   gBloom = false;
+        else if(a == "--spin" && i+1 < argc) gSpin = std::clamp(std::atof(argv[++i]), 0.0, 0.99);
         else if(a == "--grid" && i+1 < argc) {
             std::string m = argv[++i];
             gGridMode = (m == "off") ? 0 : (m == "overlay" ? 2 : 1);
@@ -1080,8 +1215,8 @@ int main(int argc, char** argv){
         ++fpsFrames;
         if (frameT - fpsT0 >= 0.5) {
             char title[128];
-            std::snprintf(title, sizeof(title), "Black Hole  |  %.0f FPS  |  gravity %s",
-                          fpsFrames / (frameT - fpsT0), gGravity ? "ON" : "off");
+            std::snprintf(title, sizeof(title), "Black Hole  |  %.0f FPS  |  spin a/M = %.2f  |  gravity %s",
+                          fpsFrames / (frameT - fpsT0), gSpin, gGravity ? "ON" : "off");
             glfwSetWindowTitle(gWin, title);
             fpsFrames = 0; fpsT0 = frameT;
         }

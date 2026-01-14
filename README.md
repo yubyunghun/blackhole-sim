@@ -13,8 +13,12 @@ relativistic effects.
 
 ## Features
 
-- **Geodesic ray tracing** in a compute shader. Light paths follow the
-  Schwarzschild metric, integrated with RK4 and an adaptive step size.
+- **Spinning (Kerr) black hole.** Light paths follow the Kerr metric for any
+  spin from 0 (non-rotating) to 0.99. Frame dragging produces the
+  off-centre, D-shaped shadow, and the disk's inner edge moves in to the
+  innermost stable orbit.
+- **Geodesic ray tracing** in a compute shader, integrated with RK4 and an
+  adaptive step size.
 - **Gravitational lensing.** The far side of the disk appears above and below
   the hole, the photon ring is visible, and the starfield is distorted
   around it.
@@ -39,6 +43,7 @@ relativistic effects.
 |---|---|
 | Left-drag | Orbit the camera |
 | Scroll | Zoom |
+| `[` / `]` | Decrease / increase spin (0 – 0.99) |
 | `G` / hold right mouse | Toggle gravity / gravity while held |
 | `D` | Relativistic disk ↔ reference flat disk |
 | `B` | Starfield on/off |
@@ -47,7 +52,7 @@ relativistic effects.
 | `P` | Save a screenshot (`screenshot_<time>.bmp`) |
 | `Esc` | Quit |
 
-The window title shows the FPS and whether gravity is on.
+The window title shows the FPS, the spin, and whether gravity is on.
 
 ## Building (Windows, MSVC)
 
@@ -74,8 +79,8 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ### Command-line options
 
 ```
-main.exe [--screenshot out.bmp [frames]] [--gravity] [--flat-disk] [--no-stars]
-         [--no-bloom] [--grid ray|off|overlay]
+main.exe [--screenshot out.bmp [frames]] [--spin 0..0.99] [--gravity] [--flat-disk]
+         [--no-stars] [--no-bloom] [--grid ray|off|overlay]
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
@@ -87,19 +92,24 @@ Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
 
 1. **Ray setup.** For each pixel, a compute shader builds a ray from the
    camera.
-2. **Integration.** A photon's path in Schwarzschild spacetime obeys
-   `d²x/dλ² = −1.5 · rs · h² · x / r⁵`, where `h = |x × v|` is conserved.
-   This gives the same trajectories as the full geodesic equations, but in
-   Cartesian coordinates (no singularity at the poles). It is integrated with
-   RK4 in units of `rs` (so `r⁵` fits in a 32-bit float), using a step of 2%
-   of the current radius.
+2. **Integration.** Rays are integrated in **Kerr–Schild coordinates**.
+   These are Cartesian, smooth across the horizon, and have no singularity
+   at the poles. The metric is `g = η + f·k⊗k`, so the photon Hamiltonian is
+   `H = ½(−1 + |p|² − f·(1 + k·p)²)`. Hamilton's equations, with analytic
+   gradients of `f` and `k`, are stepped with RK4 in units of `rs`. The step
+   is 2% of the radius near the hole, growing to 8% far away.
+   - Rays are traced backwards in time, which for Kerr is the same as
+     tracing forwards around a hole with the opposite spin.
+   - With spin 0 this reduces exactly to Schwarzschild.
 3. **Hits.** Each step is tested against the disk plane (interpolated to the
    exact crossing point), the stars (segment–sphere test), and the event
    horizon. Rays that escape sample the starfield in their final direction.
    The grid surface `y = y₀ + 2·√(rs·(d − rs))` is tested on every step too.
    Grid lines are blended in front to back and the ray keeps going, so
    whatever lies behind still shows through the gaps.
-4. **Disk shading.** `g = Doppler × gravitational` shift. Observed intensity
+4. **Disk shading.** For gas on circular Kerr orbits, the redshift is
+   `g = 1 / (u_cam · uᵗ · (1 − Ω·L))`. This single factor includes Doppler
+   beaming, frame dragging and gravitational redshift. Observed intensity
    scales as `g⁴` and observed temperature as `g · T`.
 5. **Post-processing.** The HDR image goes through a bright pass, a two-scale
    Gaussian blur and ACES tone mapping. The result is blended over the grid.
