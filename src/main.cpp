@@ -26,6 +26,7 @@
 #include <iostream>
 #include <cctype>
 #include <ctime>
+#include <cstring>
 
 using namespace glm;
 using std::vector;
@@ -38,6 +39,9 @@ using std::vector;
 #endif
 #ifndef GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
 #define GL_SHADER_IMAGE_ACCESS_BARRIER_BIT 0x00000020
+#endif
+#ifndef GL_TEXTURE_FETCH_BARRIER_BIT
+#define GL_TEXTURE_FETCH_BARRIER_BIT 0x00000008
 #endif
 typedef void (APIENTRYP PFN_BindImageTexture)(GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum);
 typedef void (APIENTRYP PFN_DispatchCompute)(GLuint, GLuint, GLuint);
@@ -178,7 +182,18 @@ layout(local_size_x=16, local_size_y=16) in;
 
 // Output image
 // HDR output (values may exceed 1); tone mapping + bloom happen afterwards
-layout(binding=0, rgba16f) writeonly uniform image2D outImage;
+// Read-write: in progressive mode each new sample is blended into what's there.
+layout(binding=0, rgba16f) uniform image2D outImage;
+
+// Progressive rendering. This dispatch covers pixels  gid*uStride + uOffset,
+// each shot through a sub-pixel jittered position, blended in with weight uBlend
+// (1 = overwrite). uFillBlock = 1 also writes the sample to the rest of its
+// stride x stride block, so the first pass after a reset has no holes.
+uniform int   uStride;
+uniform ivec2 uOffset;
+uniform vec2  uJitter;      // per-frame sub-pixel offset in [-0.5, 0.5]
+uniform float uBlend;
+uniform int   uFillBlock;
 
 // Camera UBO: std140-safe packing
 layout(std140, binding=1) uniform Camera {
@@ -481,6 +496,25 @@ const float GRID_LINE_PX   = 1.1;    // line width in pixels
 const vec3  GRID_COLOR     = vec3(0.5);
 const float GRID_ALPHA     = 0.7;
 
+// Store a sample: blend into the running average, or overwrite (and optionally
+// fill the whole block on the first pass after a reset).
+void writeSample(ivec2 pix, vec4 c, int W, int H){
+    if (uBlend >= 1.0) {
+        if (uFillBlock == 1) {
+            for (int dy = 0; dy < uStride; ++dy)
+            for (int dx = 0; dx < uStride; ++dx) {
+                ivec2 q = pix + ivec2(dx, dy);
+                if (q.x < W && q.y < H) imageStore(outImage, q, c);
+            }
+        } else {
+            imageStore(outImage, pix, c);
+        }
+    } else {
+        vec4 old = imageLoad(outImage, pix);
+        imageStore(outImage, pix, mix(old, c, uBlend));
+    }
+}
+
 // signed height above the surface (rs units, rs = 1)
 float gridF(vec3 p, float y0){
     float d = max(length(p.xz), 1.0);
@@ -490,7 +524,7 @@ float gridF(vec3 p, float y0){
 void main(){
     int WIDTH  = CAM.ires.x;
     int HEIGHT = CAM.ires.y;
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy) * uStride + uOffset;
     if (pix.x >= WIDTH || pix.y >= HEIGHT) return;
     bool rtGrid = CAM.ires.z == 1;
 
@@ -504,8 +538,12 @@ void main(){
     float rPlus = kerr.y;
     A = -aPhys;                                 // backwards in time == opposite spin
 
-    float u = (2.0*(pix.x+0.5)/WIDTH - 1.0) * CAM.params.y * CAM.params.x;
-    float v_ = (1.0 - 2.0*(pix.y+0.5)/HEIGHT) * CAM.params.x;
+    // per-pixel random rotation of the shared jitter sequence, so neighbouring
+    // pixels don't all sample the same sub-pixel spot (avoids visible patterns)
+    vec2 jit = fract(uJitter + 0.5 + vec2(hash13(vec3(pix, 1.0)), hash13(vec3(pix, 7.0)))) - 0.5;
+    if (uBlend >= 1.0) jit = uJitter;   // fresh image: keep it deterministic
+    float u = (2.0*(pix.x + 0.5 + jit.x)/WIDTH - 1.0) * CAM.params.y * CAM.params.x;
+    float v_ = (1.0 - 2.0*(pix.y + 0.5 + jit.y)/HEIGHT) * CAM.params.x;
     vec3 dir = normalize(u * CAM.camRight.xyz - v_ * CAM.camUp.xyz + CAM.camFwd.xyz);
 
     vec3 x  = CAM.camPos.xyz / RS;  // world position, rs units (used for hit tests)
@@ -513,7 +551,7 @@ void main(){
     vec3 xl = x.zxy;                // local Kerr-Schild position (spin axis = Z)
     float fCam = ksF(xl);
     if (fCam >= 0.999) {            // camera inside the horizon: nothing to see
-        imageStore(outImage, pix, vec4(0,0,0,1));
+        writeSample(pix, vec4(0,0,0,1), WIDTH, HEIGHT);
         return;
     }
     vec3 pl = initMomentum(xl, dir.zxy);
@@ -627,7 +665,7 @@ void main(){
 
     // grid lines in front, everything else behind (premultiplied "over")
     color = front + (1.0 - front.a) * color;
-    imageStore(outImage, pix, color);
+    writeSample(pix, color, WIDTH, HEIGHT);
 }
 )";
 
@@ -809,33 +847,101 @@ static void uploadObjsUBO(){
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ObjsUBO), &u);
 }
 
+// ---------- Progressive rendering ----------
+// Moving camera: trace every pixel of a low-res image each frame (gTexOut).
+// Still camera:  full-res image (gTexAccum), but each frame traces only one
+// pixel of every 2x2 block, cycling through the four. Every visit uses a new
+// sub-pixel jitter and is blended into a running average -> anti-aliasing.
+// The average keeps a minimum weight for new samples (PROG_BLEND_MIN) so
+// animated gas and moving stars stay sharp instead of smearing.
+static GLuint gTexAccum = 0;       // full-res progressive image
+static GLuint gTexCur   = 0;       // whichever image is shown this frame
+static const int   PROG_STRIDE    = 2;
+static const float PROG_BLEND_MIN = 0.2f;   // ~5-sample moving average at most
+static int  gPassIndex = 0;        // still-camera passes since the last reset
+static bool gAccumReset = true;
+
+static void initRenderTargets(){
+    glBindTexture(GL_TEXTURE_2D, gTexOut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gMovingW, gMovingH, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glGenTextures(1, &gTexAccum);
+    glBindTexture(GL_TEXTURE_2D, gTexAccum);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gStillW, gStillH, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gTexCur = gTexAccum;
+}
+
+// Anything that changes the picture (other than the animated gas, which the
+// moving average handles) restarts the accumulation.
+static bool sceneChanged(){
+    static double last[9] = {};
+    double now[9] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
+                      double(gRealDisk), double(gShowStars), double(gGridMode),
+                      double(gObjs.size()), double(gWinW) };
+    bool changed = std::memcmp(last, now, sizeof(now)) != 0;
+    std::memcpy(last, now, sizeof(now));
+    return changed;
+}
+
+static float halton(int i, int b){
+    float f = 1.0f, r = 0.0f;
+    while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
+    return r;
+}
+
+// Effective samples per pixel (for the title bar). Once the blend weight hits
+// its floor w, the running average behaves like ~(2 - w) / w samples.
+static int progressiveSamples(){
+    if (gCam.moving) return 1;
+    int n = std::max(1, gPassIndex / (PROG_STRIDE*PROG_STRIDE));
+    int cap = int((2.0f - PROG_BLEND_MIN) / PROG_BLEND_MIN + 0.5f);
+    return std::min(n, cap);
+}
+
 // ---------- Compute dispatch ----------
 static void dispatchCompute(){
-    // ensure output texture matches compute size
-    int cw = gCam.moving ? gMovingW : gStillW;
-    int ch = gCam.moving ? gMovingH : gStillH;
-
-    // only (re)allocate when the resolution actually changes
-    static int texW = 0, texH = 0;
-    glBindTexture(GL_TEXTURE_2D, gTexOut);
-    if (cw != texW || ch != texH) {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, cw, ch, 0, GL_RGBA, GL_FLOAT, nullptr);
-        texW = cw; texH = ch;
-    }
-
     glUseProgram(gProgComp);
-    // Bind UBOs
     glBindBufferBase(GL_UNIFORM_BUFFER, 1, gUBOCamera);
     glBindBufferBase(GL_UNIFORM_BUFFER, 2, gUBODisk);
     glBindBufferBase(GL_UNIFORM_BUFFER, 3, gUBOObjs);
 
-    // bind image
-    glBindImageTexture(0, gTexOut, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    int stride = 1, offX = 0, offY = 0, fill = 0;
+    float blend = 1.0f, jx = 0.0f, jy = 0.0f;
+    int w, h;
+    GLuint target;
 
-    GLuint gx = (GLuint) ((cw + 15) / 16);
-    GLuint gy = (GLuint) ((ch + 15) / 16);
-    glDispatchCompute(gx, gy, 1);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    bool changed = sceneChanged();
+    if (gCam.moving) {
+        target = gTexOut; w = gMovingW; h = gMovingH;
+        gAccumReset = true;                    // start fresh once the camera stops
+    } else {
+        target = gTexAccum; w = gStillW; h = gStillH;
+        if (changed || gAccumReset) { gPassIndex = 0; gAccumReset = false; }
+        const int cells = PROG_STRIDE * PROG_STRIDE;
+        static const int order[4][2] = { {0,0}, {1,1}, {1,0}, {0,1} };  // spread out
+        int k = gPassIndex % cells;
+        int n = gPassIndex / cells;            // samples this pixel already has
+        stride = PROG_STRIDE;
+        offX = order[k][0]; offY = order[k][1];
+        blend = (n == 0) ? 1.0f : std::max(1.0f / float(n + 1), PROG_BLEND_MIN);
+        if (n > 0) { jx = halton(n, 2) - 0.5f; jy = halton(n, 3) - 0.5f; }
+        fill = (gPassIndex == 0) ? 1 : 0;      // first pass: no holes
+        ++gPassIndex;
+    }
+
+    glUniform1i(glGetUniformLocation(gProgComp, "uStride"), stride);
+    glUniform2i(glGetUniformLocation(gProgComp, "uOffset"), offX, offY);
+    glUniform2f(glGetUniformLocation(gProgComp, "uJitter"), jx, jy);
+    glUniform1f(glGetUniformLocation(gProgComp, "uBlend"), blend);
+    glUniform1i(glGetUniformLocation(gProgComp, "uFillBlock"), fill);
+
+    glBindImageTexture(0, target, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
+
+    int tw = (w + stride - 1) / stride, th = (h + stride - 1) / stride;
+    glDispatchCompute(GLuint((tw + 15) / 16), GLuint((th + 15) / 16), 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    gTexCur = target;
 }
 
 // ---------- Post-processing: bloom + tone mapping ----------
@@ -945,7 +1051,7 @@ static void runBloom(){
 
     glUseProgram(gProgBright);
     glUniform1f(glGetUniformLocation(gProgBright, "uThreshold"), 0.8f);
-    pass(gProgBright, gTexOut, gBloomA1);    // bright pass, downsample to 1/2
+    pass(gProgBright, gTexCur, gBloomA1);    // bright pass, downsample to 1/2
     blur(gBloomA1, gBloomA2, 2);             // tight glow
     pass(gProgBlit, gBloomA1.tex, gBloomB1); // downsample to 1/4
     blur(gBloomB1, gBloomB2, 3);             // wide haze
@@ -959,7 +1065,7 @@ static void runBloom(){
 // ---------- Draw ----------
 static void drawQuad(){
     glUseProgram(gProgComposite);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gTexOut);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gTexCur);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gBloomA1.tex);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gBloomB1.tex);
     glActiveTexture(GL_TEXTURE0);
@@ -1160,6 +1266,7 @@ static void initGL(){
     gProgComp = makeComp(CS_GEOD);
 
     createQuad();
+    initRenderTargets();
     initBloom();
     generateGrid();
 
@@ -1215,8 +1322,8 @@ int main(int argc, char** argv){
         ++fpsFrames;
         if (frameT - fpsT0 >= 0.5) {
             char title[128];
-            std::snprintf(title, sizeof(title), "Black Hole  |  %.0f FPS  |  spin a/M = %.2f  |  gravity %s",
-                          fpsFrames / (frameT - fpsT0), gSpin, gGravity ? "ON" : "off");
+            std::snprintf(title, sizeof(title), "Black Hole  |  %.0f FPS  |  %d spp  |  spin a/M = %.2f  |  gravity %s",
+                          fpsFrames / (frameT - fpsT0), progressiveSamples(), gSpin, gGravity ? "ON" : "off");
             glfwSetWindowTitle(gWin, title);
             fpsFrames = 0; fpsT0 = frameT;
         }

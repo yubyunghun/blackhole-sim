@@ -29,6 +29,10 @@ relativistic effects.
 - **Animated gas.** A procedural texture with differential rotation: inner
   rings orbit faster than outer ones.
 - **HDR bloom and ACES tone mapping.**
+- **Progressive rendering.** A quick low-res preview while you move the
+  camera. When it stops, the full-res image is refined over the next frames
+  with jittered samples (anti-aliasing), tracing only a quarter of the pixels
+  per frame so it stays at 60 FPS.
 - **Ray-traced spacetime grid.** The black hole's embedding diagram (Flamm's
   paraboloid) is drawn as a grid that light rays actually hit, so it is
   lensed, wraps around the shadow, and is hidden behind the hole.
@@ -52,7 +56,8 @@ relativistic effects.
 | `P` | Save a screenshot (`screenshot_<time>.bmp`) |
 | `Esc` | Quit |
 
-The window title shows the FPS, the spin, and whether gravity is on.
+The window title shows the FPS, the effective samples per pixel, the spin,
+and whether gravity is on.
 
 ## Building (Windows, MSVC)
 
@@ -111,5 +116,10 @@ Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
    `g = 1 / (u_cam · uᵗ · (1 − Ω·L))`. This single factor includes Doppler
    beaming, frame dragging and gravitational redshift. Observed intensity
    scales as `g⁴` and observed temperature as `g · T`.
-5. **Post-processing.** The HDR image goes through a bright pass, a two-scale
+5. **Progressive refinement.** With the camera still, each frame traces one
+   pixel of every 2×2 block, cycling through the four. Each sample is shot
+   through a jittered sub-pixel position (Halton sequence) and blended into a
+   running average. The blend weight never drops below 0.2, so the animated
+   gas stays sharp. Any change to the view or settings restarts the average.
+6. **Post-processing.** The HDR image goes through a bright pass, a two-scale
    Gaussian blur and ACES tone mapping. The result is blended over the grid.
