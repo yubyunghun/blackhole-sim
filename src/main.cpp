@@ -94,6 +94,8 @@ static float gDiskGain  = 1.5f;     // brightness
 static float gGasSpeed  = 4.0f;     // gas rotation speed
 static float gDiskOuter = 5.2f;     // outer radius (rs)
 static bool  gShowUI    = true;     // H key
+static bool  gVideoLook = false;    // V key: match the look of the reference video
+static void setVideoLook(bool on);  // defined with the other scene actions
 static const char* kGridModeNames[] = { "off", "ray traced", "flat overlay (reference)" };
 
 // ---------- Camera ----------
@@ -183,7 +185,8 @@ void main(){ gl_Position = uVP * vec4(aPos,1.0); }
 static const char* FS_GRID = R"(
 #version 330 core
 out vec4 o;
-void main(){ o = vec4(0.5,0.5,0.5,0.7); }
+uniform vec4 uColor;
+void main(){ o = uColor; }
 )";
 
 // Compute shader (based on repo, refactored for std140 + params packing)
@@ -545,6 +548,7 @@ void main(){
     int flags = int(CAM.params.w + 0.5);
     bool realDisk = (flags & 1) != 0;
     bool showStars = (flags & 2) != 0;
+    bool videoLook = (flags & 4) != 0;   // match the reference video's look
 
     RS = disk.z;
     float r1 = disk.x / RS, r2 = disk.y / RS;   // Boyer-Lindquist radii (rs units)
@@ -646,7 +650,14 @@ void main(){
         if (hit == 1) {
             vec3 pc = mix(p0, p1, bestT);
             float rBL = sqrt(max(dot(pc.xz, pc.xz) - aPhys*aPhys, 0.0));
-            if (realDisk) {
+            if (videoLook) {
+                // flat orange, colours sampled from the reference video:
+                // inner (237,68,47) -> middle (255,121,49) -> outer (255,151,65)
+                float s = clamp((rBL - r1) / (r2 - r1), 0.0, 1.0);
+                vec3 c = s < 0.5 ? mix(vec3(0.93, 0.27, 0.18), vec3(1.00, 0.47, 0.19), s * 2.0)
+                                 : mix(vec3(1.00, 0.47, 0.19), vec3(1.00, 0.59, 0.25), s * 2.0 - 1.0);
+                color = vec4(c, 1.0);
+            } else if (realDisk) {
                 float g = kerrDiskG(rBL, aPhys, Lphys, fCam);
                 color = diskColorRelativistic(pc, rBL, g, r1, r2, disk.w);
             } else {
@@ -662,9 +673,12 @@ void main(){
             float amb = 0.1, diff = max(dot(N, V), 0.0);
             vec4 oc = objColor[hitObj];
             color = vec4(oc.rgb * (amb + (1.0-amb)*diff), oc.a);
+            if (videoLook) color = vec4(mix(oc.rgb, vec3(1.0), 0.1), 1.0);  // flat, like the video
             done = true;
         } else if (ksR(xl) <= rPlus) {
-            color = vec4(0,0,0,1);            // crossed the event horizon
+            // crossed the event horizon. (In the video the shadow is a solid
+            // dark warm grey, sampled at (72,52,51), hiding the grid.)
+            color = videoLook ? vec4(0.28, 0.20, 0.20, 1.0) : vec4(0,0,0,1);
             done = true;
         } else if (length(x) > ESCAPE_R && dot(x, v) > 0.0) {
             // escaped to infinity: sample the sky in the final direction
@@ -675,7 +689,7 @@ void main(){
             done = true;
         }
     }
-    if (!done) color = vec4(0,0,0,1);         // trapped near photon sphere
+    if (!done) color = videoLook ? vec4(0.28, 0.20, 0.20, 1.0) : vec4(0,0,0,1);   // trapped near photon sphere
 
     // grid lines in front, everything else behind (premultiplied "over")
     color = front + (1.0 - front.a) * color;
@@ -740,7 +754,8 @@ static void createQuad(){
 }
 
 static void generateGrid(){
-    const int gridSize = 26;
+    // the video's grid runs off the edges of the screen, so make it bigger there
+    const int gridSize = gVideoLook ? 36 : 26;
     const float spacing = 1e10f;
 
     vector<vec3> verts;
@@ -789,6 +804,31 @@ struct CamUBO {
     vec4 params;    // x=tanHalfFov, y=aspect, z=moving(0/1), w=0
     ivec4 ires;     // x=WIDTH, y=HEIGHT, z,w unused
 };
+// Horizontal/vertical view aspect. The reference video shows a 4:3 render
+// stretched to a 16:9 window (everything 4/3 wider), so the video look
+// squeezes the field of view horizontally by that factor.
+static float viewAspect(){
+    float a = float(gWinW) / float(gWinH);
+    return gVideoLook ? a / ((16.0f/9.0f) / (4.0f/3.0f)) : a;
+}
+
+// ---------- Render targets ----------
+// Three images the ray tracer can write to; currentTarget() picks one per frame
+// and is the single source of truth for its size (camera UBO + dispatch).
+static GLuint gTexAccum = 0;       // still camera: full-res progressive image
+static GLuint gTexLow   = 0;       // video look: 200x150, nearest-filtered (pixelated)
+static GLuint gTexCur   = 0;       // whichever image is shown this frame
+static const int gLowW = 200, gLowH = 150;   // the reference repo's resolution
+
+struct Target { GLuint tex; int w, h; bool progressive; };
+static Target currentTarget(){
+    if (gVideoLook) return { gTexLow, gLowW, gLowH, false };
+    // Stars moving under gravity would leave trails in the running average,
+    // so treat that like a moving camera (fresh low-res image every frame).
+    if (gCam.moving || (gGravity && gObjs.size() > 1)) return { gTexOut, gMovingW, gMovingH, false };
+    return { gTexAccum, gStillW, gStillH, true };
+}
+
 static void uploadCameraUBO(){
     CamUBO data{};
     vec3 pos = gCam.position();
@@ -801,12 +841,11 @@ static void uploadCameraUBO(){
     data.camRight = vec4(right,0);
     data.camUp    = vec4(up,0);
     data.camFwd   = vec4(fwd,0);
-    float flags = float((gRealDisk ? 1 : 0) | (gShowStars ? 2 : 0));
-    data.params   = vec4(tan(radians(60.0f*0.5f)), float(gWinW)/float(gWinH), gCam.moving?1.0f:0.0f, flags);
+    float flags = float((gRealDisk ? 1 : 0) | (gShowStars ? 2 : 0) | (gVideoLook ? 4 : 0));
+    data.params   = vec4(tan(radians(60.0f*0.5f)), viewAspect(), gCam.moving?1.0f:0.0f, flags);
 
-    int cw = gCam.moving ? gMovingW : gStillW;
-    int ch = gCam.moving ? gMovingH : gStillH;
-    data.ires = ivec4(cw, ch, gGridMode, 0);   // z = grid mode (1 = ray traced)
+    Target t = currentTarget();
+    data.ires = ivec4(t.w, t.h, gGridMode, 0);   // z = grid mode (1 = ray traced)
 
     glBindBuffer(GL_UNIFORM_BUFFER, gUBOCamera);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CamUBO), &data);
@@ -846,14 +885,20 @@ struct ObjsUBO {
     vec4 mass4[4]; // 16 floats packed
 };
 static void uploadObjsUBO(){
-    ObjsUBO u{}; u.num = (int)std::min<size_t>(gObjs.size(), 16);
+    // Only the stars go to the ray tracer. The black hole itself (pinned) is
+    // handled by the horizon test; drawing it as a sphere of radius rs would
+    // wrongly cover part of the shadow for a spinning hole, whose horizon is
+    // smaller than rs.
+    vector<const ObjectData*> drawn;
+    for (const auto& o : gObjs) if (!o.pinned && drawn.size() < 16) drawn.push_back(&o);
+    ObjsUBO u{}; u.num = int(drawn.size());
     for(int i=0;i<u.num;++i){
-        u.posR[i] = gObjs[i].posRadius;
-        u.color[i]= gObjs[i].color;
+        u.posR[i] = drawn[i]->posRadius;
+        u.color[i]= drawn[i]->color;
     }
     // pack masses into mass4[4]
     float temp[16] = {};
-    for(int i=0;i<u.num;++i) temp[i] = gObjs[i].mass;
+    for(int i=0;i<u.num;++i) temp[i] = drawn[i]->mass;
     for(int g=0; g<4; ++g){
         u.mass4[g] = vec4( temp[g*4+0], temp[g*4+1], temp[g*4+2], temp[g*4+3] );
     }
@@ -868,8 +913,6 @@ static void uploadObjsUBO(){
 // sub-pixel jitter and is blended into a running average -> anti-aliasing.
 // The average keeps a minimum weight for new samples (PROG_BLEND_MIN) so
 // animated gas and moving stars stay sharp instead of smearing.
-static GLuint gTexAccum = 0;       // full-res progressive image
-static GLuint gTexCur   = 0;       // whichever image is shown this frame
 static const int   PROG_STRIDE    = 2;
 static const float PROG_BLEND_MIN = 0.2f;   // ~5-sample moving average at most
 static int  gPassIndex = 0;        // still-camera passes since the last reset
@@ -883,6 +926,11 @@ static void initRenderTargets(){
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gStillW, gStillH, 0, GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glGenTextures(1, &gTexLow);
+    glBindTexture(GL_TEXTURE_2D, gTexLow);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gLowW, gLowH, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);   // blocky, like the video
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     gTexCur = gTexAccum;
 }
 
@@ -908,7 +956,7 @@ static float halton(int i, int b){
 // Effective samples per pixel (for the title bar). Once the blend weight hits
 // its floor w, the running average behaves like ~(2 - w) / w samples.
 static int progressiveSamples(){
-    if (gCam.moving || (gGravity && gObjs.size() > 1)) return 1;
+    if (!currentTarget().progressive) return 1;
     int n = std::max(1, gPassIndex / (PROG_STRIDE*PROG_STRIDE));
     int cap = int((2.0f - PROG_BLEND_MIN) / PROG_BLEND_MIN + 0.5f);
     return std::min(n, cap);
@@ -923,18 +971,13 @@ static void dispatchCompute(){
 
     int stride = 1, offX = 0, offY = 0, fill = 0;
     float blend = 1.0f, jx = 0.0f, jy = 0.0f;
-    int w, h;
-    GLuint target;
-
     bool changed = sceneChanged();
-    // Stars moving under gravity would leave trails in the running average,
-    // so treat that like a moving camera (fresh low-res image every frame).
-    bool dynamic = gCam.moving || (gGravity && gObjs.size() > 1);
-    if (dynamic) {
-        target = gTexOut; w = gMovingW; h = gMovingH;
-        gAccumReset = true;                    // start fresh once the camera stops
+    Target t = currentTarget();
+    GLuint target = t.tex;
+    int w = t.w, h = t.h;
+    if (!t.progressive) {
+        gAccumReset = true;                    // start fresh once we go back to still
     } else {
-        target = gTexAccum; w = gStillW; h = gStillH;
         if (changed || gAccumReset) { gPassIndex = 0; gAccumReset = false; }
         const int cells = PROG_STRIDE * PROG_STRIDE;
         static const int order[4][2] = { {0,0}, {1,1}, {1,0}, {0,1} };  // spread out
@@ -1112,6 +1155,9 @@ static void drawQuad(){
 static void drawGrid(const mat4& VP){
     glUseProgram(gProgGrid);
     glUniformMatrix4fv(glGetUniformLocation(gProgGrid,"uVP"),1,GL_FALSE,value_ptr(VP));
+    // grey like the reference code, or the pinkish grey (188,162,168) seen in the video
+    if (gVideoLook) glUniform4f(glGetUniformLocation(gProgGrid,"uColor"), 0.74f, 0.64f, 0.66f, 0.85f);
+    else            glUniform4f(glGetUniformLocation(gProgGrid,"uColor"), 0.5f, 0.5f, 0.5f, 0.7f);
     glBindVertexArray(gGridVAO);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -1160,6 +1206,7 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
     if(uiWantsKeys()) return;             // typing into a UI field
     if(action==GLFW_PRESS && key==GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win,1);
     if(action==GLFW_PRESS && key==GLFW_KEY_H) gShowUI = !gShowUI;
+    if(action==GLFW_PRESS && key==GLFW_KEY_V) setVideoLook(!gVideoLook);
     if(action==GLFW_PRESS && key==GLFW_KEY_P) gScreenshotRequested = true;
     if(action==GLFW_PRESS && key==GLFW_KEY_D){
         gRealDisk = !gRealDisk;
@@ -1290,6 +1337,31 @@ static void orbitStars(){
     gGravity = true;
 }
 
+// "Video look": reproduce the reference video. Saves the user's settings so
+// turning it off puts everything back.
+struct SavedLook { double spin; bool realDisk, stars, bloom; int grid; };
+static SavedLook gSavedLook;
+
+static void setVideoLook(bool on){
+    if (on == gVideoLook) return;
+    if (on) {
+        gSavedLook = { gSpin, gRealDisk, gShowStars, gBloom, gGridMode };
+        gSpin = 0.0;            // the video's black hole doesn't spin
+        gRealDisk = false;      // flat disk, no Doppler
+        gShowStars = false;
+        gBloom = false;
+        gGridMode = 2;          // original flat overlay grid
+        // camera: ~18 rs out, ~26 degrees above the disk, red star up-right
+        gCam.radius    = 2.35e11f;
+        gCam.elevation = float(M_PI) * 0.5f - 0.45f;
+        gCam.azimuth   = -float(M_PI) * 0.5f - 0.35f;
+    } else {
+        gSpin = gSavedLook.spin; gRealDisk = gSavedLook.realDisk;
+        gShowStars = gSavedLook.stars; gBloom = gSavedLook.bloom; gGridMode = gSavedLook.grid;
+    }
+    gVideoLook = on;
+}
+
 // ---------- UI panel (Dear ImGui) ----------
 static void drawUI(){
     if (!gShowUI) return;
@@ -1302,6 +1374,9 @@ static void drawUI(){
     ImGui::Text("%.0f FPS   %d spp   %dx%d", ImGui::GetIO().Framerate,
                 progressiveSamples(), resW, resH);
     ImGui::TextDisabled("H hides this panel");
+    bool video = gVideoLook;
+    if (ImGui::Checkbox("Video look (V)", &video)) setVideoLook(video);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Match the reference video: flat orange disk,\n200x150 pixels, overlay grid, no spin");
 
     if (ImGui::CollapsingHeader("Black hole", ImGuiTreeNodeFlags_DefaultOpen)) {
         float spin = float(gSpin);
@@ -1419,6 +1494,7 @@ int main(int argc, char** argv){
     int autoFrames = 20;
     bool shotWithUI = false;     // screenshots normally leave the panel out
     bool startOrbit = false;     // --orbit: start with the stars on circular orbits
+    bool startVideo = false;     // --video-look
     for(int i=1;i<argc;++i){
         std::string a = argv[i];
         if(a == "--screenshot" && i+1 < argc){
@@ -1431,6 +1507,7 @@ int main(int argc, char** argv){
         else if(a == "--spin" && i+1 < argc) gSpin = std::clamp(std::atof(argv[++i]), 0.0, 0.99);
         else if(a == "--no-ui")      gShowUI = false;
         else if(a == "--orbit")      startOrbit = true;
+        else if(a == "--video-look") startVideo = true;
         else if(a == "--shot-ui")    shotWithUI = true;
         else if(a == "--grid" && i+1 < argc) {
             std::string m = argv[++i];
@@ -1441,12 +1518,15 @@ int main(int argc, char** argv){
     initGL();
     gInitialObjs = gObjs;
     if (startOrbit) orbitStars();
+    if (startVideo) setVideoLook(true);
     int frameCount = 0;
 
     double lastMoveT = glfwGetTime();
     double lastFrameT = glfwGetTime();
     while(!glfwWindowShouldClose(gWin)){
-        glClearColor(0.0f,0.0f,0.0f,1.0f);
+        // background: black, or the video's dark slate (~45,45,50)
+        if (gVideoLook) glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
+        else            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         double frameT = glfwGetTime();
@@ -1488,7 +1568,7 @@ int main(int argc, char** argv){
         vec3 camPos = gCam.position();
         mat4 V = lookAt(camPos, gCam.target, vec3(0,1,0));
         // 60deg FOV to match the ray tracer's tanHalfFov, so grid and image line up
-        mat4 P = perspective(radians(60.0f), float(gWinW)/float(gWinH), 1e9f, 1e14f);
+        mat4 P = perspective(radians(60.0f), viewAspect(), 1e9f, 1e14f);
         if (gGridMode == 2) drawGrid(P*V);   // modes 0/1: grid is off or inside the ray tracer
 
         // blit

@@ -40,6 +40,11 @@ relativistic effects.
   event horizon.
 - **Reference mode** (press `D`) that reproduces the flat orange disk from the
   original project.
+- **Video look** (press `V`) that matches the original project's video. It
+  uses the flat orange disk with colours sampled from the video, a 200×150
+  pixelated render stretched from 4:3 to 16:9, the overlay grid, the slate
+  background and the same camera angle. Turning it off restores your
+  settings.
 
 ## Controls
 
@@ -62,6 +67,7 @@ and **Reset scene** buttons.
 | `T` | Grid: ray traced → off → flat overlay (reference) |
 | `P` | Save a screenshot (`screenshot_<time>.bmp`, without the panel) |
 | `H` | Show/hide the control panel |
+| `V` | Video look on/off (match the original video) |
 | `Esc` | Quit |
 
 The window title shows the FPS, the effective samples per pixel, the spin,
@@ -94,7 +100,7 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ```
 main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
-         [--no-ui]
+         [--no-ui] [--video-look]
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
