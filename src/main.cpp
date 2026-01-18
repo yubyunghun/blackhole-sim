@@ -9,6 +9,10 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -83,6 +87,13 @@ static bool  gShowStars = true;   // B: lensed starfield background
 static int   gGridMode = 1;
 // [ / ]: black hole spin chi = a/M (0 = Schwarzschild, ->1 = maximally spinning)
 static double gSpin = 0.9;
+
+// Disk look (UI panel)
+static float gDiskTemp  = 4500.0f;  // K at r = 2.2 rs
+static float gDiskGain  = 1.5f;     // brightness
+static float gGasSpeed  = 4.0f;     // gas rotation speed
+static float gDiskOuter = 5.2f;     // outer radius (rs)
+static bool  gShowUI    = true;     // H key
 static const char* kGridModeNames[] = { "off", "ray traced", "flat overlay (reference)" };
 
 // ---------- Camera ----------
@@ -427,10 +438,13 @@ float gasAt(float r, float phi){
 // Shear would wind the pattern into ever-tighter spirals, so we use the
 // flow-map trick: two copies with staggered resets, cross-faded so each one
 // resets while invisible.
-const float SPIN = 4.0;      // angular speed scale (rad/s at r = 1 rs)
+// Disk look, set from the UI panel
+uniform float uGasSpeed;     // angular speed scale (rad/s at r = 1 rs), default 4
+uniform float uDiskTemp;     // emitted temperature (K) at r = 2.2 rs, default 4500
+uniform float uDiskGain;     // brightness multiplier, default 1.5
 const float FLOW_P = 4.0;    // seconds per flow cycle
 float gasDensity(float r, float phi, float t){
-    float omega = SPIN * pow(r, -1.5);
+    float omega = uGasSpeed * pow(r, -1.5);
     float tA = mod(t, FLOW_P);
     float tB = mod(t + 0.5*FLOW_P, FLOW_P);
     float wA = 1.0 - abs(2.0*tA/FLOW_P - 1.0);
@@ -470,12 +484,12 @@ vec4 diskColorRelativistic(vec3 pc, float r, float g, float r1, float r2, float 
     // profiles are anchored at a fixed radius (2.2 rs), not the inner edge, so
     // spin (which moves the ISCO inward) adds hotter gas instead of dimming the rest
     const float R_REF = 2.2;
-    float T = 4500.0 * pow(r / R_REF, -0.75);
+    float T = uDiskTemp * pow(r / R_REF, -0.75);
     vec3 col = blackbody(T * g);
 
     float gas = gasDensity(r, atan(pc.z, pc.x), t);
     float I = pow(g, 4.0) * pow(R_REF / r, 1.5) * (0.25 + 1.6 * gas);
-    vec3 c = col * I * 1.5;                       // linear HDR; tone mapped later
+    vec3 c = col * I * uDiskGain;                 // linear HDR; tone mapped later
     // opaque disk with soft inner/outer edges (premultiplied alpha)
     float edge = smoothstep(r2, r2 - 0.6, r) * smoothstep(r1, r1 + 0.15, r);
     return vec4(c * edge, edge);
@@ -818,7 +832,7 @@ static void uploadDiskUBO(){
     double rPlus = M + std::sqrt(M*M - a*a);
     // Inner edge: the reference's 2.2 rs, or the ISCO if spin pulls it closer
     double r1 = std::min(2.2, iscoOverM(gSpin) * M);
-    d.disk = vec4(float(SAG_RS*r1), float(SAG_RS*5.2), float(SAG_RS), t);
+    d.disk = vec4(float(SAG_RS*r1), float(SAG_RS*gDiskOuter), float(SAG_RS), t);
     d.kerr = vec4(float(a), float(rPlus), 0.0f, 0.0f);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBODisk);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DiskUBO), &d);
@@ -875,10 +889,11 @@ static void initRenderTargets(){
 // Anything that changes the picture (other than the animated gas, which the
 // moving average handles) restarts the accumulation.
 static bool sceneChanged(){
-    static double last[9] = {};
-    double now[9] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
-                      double(gRealDisk), double(gShowStars), double(gGridMode),
-                      double(gObjs.size()), double(gWinW) };
+    static double last[13] = {};
+    double now[13] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
+                       double(gRealDisk), double(gShowStars), double(gGridMode),
+                       double(gObjs.size()), double(gWinW),
+                       gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter };
     bool changed = std::memcmp(last, now, sizeof(now)) != 0;
     std::memcpy(last, now, sizeof(now));
     return changed;
@@ -893,7 +908,7 @@ static float halton(int i, int b){
 // Effective samples per pixel (for the title bar). Once the blend weight hits
 // its floor w, the running average behaves like ~(2 - w) / w samples.
 static int progressiveSamples(){
-    if (gCam.moving) return 1;
+    if (gCam.moving || (gGravity && gObjs.size() > 1)) return 1;
     int n = std::max(1, gPassIndex / (PROG_STRIDE*PROG_STRIDE));
     int cap = int((2.0f - PROG_BLEND_MIN) / PROG_BLEND_MIN + 0.5f);
     return std::min(n, cap);
@@ -912,7 +927,10 @@ static void dispatchCompute(){
     GLuint target;
 
     bool changed = sceneChanged();
-    if (gCam.moving) {
+    // Stars moving under gravity would leave trails in the running average,
+    // so treat that like a moving camera (fresh low-res image every frame).
+    bool dynamic = gCam.moving || (gGravity && gObjs.size() > 1);
+    if (dynamic) {
         target = gTexOut; w = gMovingW; h = gMovingH;
         gAccumReset = true;                    // start fresh once the camera stops
     } else {
@@ -935,6 +953,9 @@ static void dispatchCompute(){
     glUniform2f(glGetUniformLocation(gProgComp, "uJitter"), jx, jy);
     glUniform1f(glGetUniformLocation(gProgComp, "uBlend"), blend);
     glUniform1i(glGetUniformLocation(gProgComp, "uFillBlock"), fill);
+    glUniform1f(glGetUniformLocation(gProgComp, "uDiskTemp"), gDiskTemp);
+    glUniform1f(glGetUniformLocation(gProgComp, "uDiskGain"), gDiskGain);
+    glUniform1f(glGetUniformLocation(gProgComp, "uGasSpeed"), gGasSpeed);
 
     glBindImageTexture(0, target, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
 
@@ -1112,7 +1133,14 @@ static void cursorPosCB(GLFWwindow*, double x, double y){
     gCam.lastX=x; gCam.lastY=y;
     gCam.moving = true;
 }
+// True when the mouse/keyboard is being used by the UI panel, so the scene
+// shouldn't react (e.g. dragging a slider must not orbit the camera).
+static bool uiWantsMouse(){ return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse; }
+static bool uiWantsKeys(){  return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard; }
+
 static void mouseCB(GLFWwindow* w, int button, int action, int){
+    // presses over the panel belong to the UI; releases always end a drag
+    if(action==GLFW_PRESS && uiWantsMouse()) return;
     if(button==GLFW_MOUSE_BUTTON_LEFT){
         if(action==GLFW_PRESS){ gCam.dragging=true; gCam.moving=true; glfwGetCursorPos(w,&gCam.lastX,&gCam.lastY); }
         else gCam.dragging=false;
@@ -1123,12 +1151,15 @@ static void mouseCB(GLFWwindow* w, int button, int action, int){
     }
 }
 static void scrollCB(GLFWwindow*, double, double yoff){
+    if(uiWantsMouse()) return;
     gCam.radius -= float(yoff) * float(gCam.zoomSpeed);
     gCam.radius = std::clamp(gCam.radius, 1e10f, 1e12f);
     gCam.moving = true;
 }
 static void keyCB(GLFWwindow* win, int key, int, int action, int){
+    if(uiWantsKeys()) return;             // typing into a UI field
     if(action==GLFW_PRESS && key==GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win,1);
+    if(action==GLFW_PRESS && key==GLFW_KEY_H) gShowUI = !gShowUI;
     if(action==GLFW_PRESS && key==GLFW_KEY_P) gScreenshotRequested = true;
     if(action==GLFW_PRESS && key==GLFW_KEY_D){
         gRealDisk = !gRealDisk;
@@ -1234,6 +1265,95 @@ static bool saveScreenshotBMP(const char* path){
     std::fclose(f);
     std::cout << "[INFO] Saved " << path << std::endl;    return true;
 }
+// ---------- Scene actions ----------
+static vector<ObjectData> gInitialObjs;   // captured at startup for "Reset scene"
+
+static void resetScene(){
+    gObjs = gInitialObjs;
+    gCam  = Camera{};
+    gGravity = false;
+}
+
+// Give every star the velocity of a circular orbit around the black hole
+// (prograde, same direction as the disk) and switch gravity on.
+static void orbitStars(){
+    for (auto& o : gObjs) {
+        if (o.pinned) continue;
+        vec3 r = vec3(o.posRadius);
+        double d = length(r);
+        if (d <= 0.0) continue;
+        double v = std::sqrt(G_GRAV * SAG_MASS / d);
+        vec3 dir = normalize(cross(vec3(0,1,0), r));
+        if (!std::isfinite(dir.x)) dir = vec3(1,0,0);   // star on the spin axis
+        o.velocity = dir * float(v);
+    }
+    gGravity = true;
+}
+
+// ---------- UI panel (Dear ImGui) ----------
+static void drawUI(){
+    if (!gShowUI) return;
+    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(0.78f);
+    ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushItemWidth(120.0f);   // keep the panel narrow so it covers less of the view
+
+    int resW = gCam.moving ? gMovingW : gStillW, resH = gCam.moving ? gMovingH : gStillH;
+    ImGui::Text("%.0f FPS   %d spp   %dx%d", ImGui::GetIO().Framerate,
+                progressiveSamples(), resW, resH);
+    ImGui::TextDisabled("H hides this panel");
+
+    if (ImGui::CollapsingHeader("Black hole", ImGuiTreeNodeFlags_DefaultOpen)) {
+        float spin = float(gSpin);
+        if (ImGui::SliderFloat("Spin a/M", &spin, 0.0f, 0.99f, "%.2f")) gSpin = spin;
+        double M = 0.5, a = gSpin * M;
+        ImGui::TextDisabled("horizon %.2f rs   ISCO %.2f rs",
+                            M + std::sqrt(M*M - a*a), iscoOverM(gSpin) * M);
+    }
+
+    if (ImGui::CollapsingHeader("Accretion disk", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Relativistic (D)", &gRealDisk);
+        ImGui::BeginDisabled(!gRealDisk);
+        ImGui::SliderFloat("Temperature K", &gDiskTemp, 2000.0f, 12000.0f, "%.0f");
+        ImGui::SliderFloat("Brightness", &gDiskGain, 0.2f, 6.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Gas speed", &gGasSpeed, 0.0f, 12.0f, "%.1f");
+        ImGui::EndDisabled();
+        ImGui::SliderFloat("Outer radius rs", &gDiskOuter, 3.0f, 10.0f, "%.1f");
+    }
+
+    if (ImGui::CollapsingHeader("View")) {
+        ImGui::Checkbox("Stars (B)", &gShowStars);
+        ImGui::SameLine();
+        ImGui::Checkbox("Bloom (L)", &gBloom);
+        ImGui::Combo("Grid (T)", &gGridMode, kGridModeNames, 3);
+        ImGui::TextDisabled("drag: orbit   scroll: zoom");
+        ImGui::BeginDisabled(!gBloom);
+        ImGui::SliderFloat("Bloom strength", &gBloomStrength, 0.0f, 3.0f, "%.2f");
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(!gRealDisk);
+        ImGui::SliderFloat("Exposure", &gExposure, 0.2f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("Gravity")) {
+        ImGui::Checkbox("Gravity on (G)", &gGravity);
+        float ts = float(gTimeScale);
+        if (ImGui::SliderFloat("Time scale", &ts, 100.0f, 100000.0f, "%.0fx", ImGuiSliderFlags_Logarithmic))
+            gTimeScale = ts;
+        int stars = 0; for (auto& o : gObjs) if (!o.pinned) ++stars;
+        ImGui::TextDisabled("%d star%s left", stars, stars == 1 ? "" : "s");
+        if (ImGui::Button("Orbit stars")) orbitStars();
+        ImGui::SameLine();
+        if (ImGui::Button("Reset scene")) resetScene();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Screenshot (P)")) gScreenshotRequested = true;
+
+    ImGui::PopItemWidth();
+    ImGui::End();
+}
+
 // ---------- Init ----------
 static void initGL(){
     if(!glfwInit()) die("GLFW init failed");
@@ -1260,6 +1380,15 @@ static void initGL(){
     glfwSetMouseButtonCallback(gWin, mouseCB);
     glfwSetScrollCallback(gWin, scrollCB);
     glfwSetKeyCallback(gWin, keyCB);
+
+    // Dear ImGui. Installed after our callbacks so it chains to them.
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;     // don't write imgui.ini next to the exe
+    ImGui::StyleColorsDark();
+    ImGui::GetStyle().WindowRounding = 6.0f;
+    ImGui_ImplGlfw_InitForOpenGL(gWin, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
 
     gProgBlit = makeProg(VS_BLIT, FS_BLIT);
     gProgGrid = makeProg(VS_GRID, FS_GRID);
@@ -1288,6 +1417,8 @@ int main(int argc, char** argv){
     // renders N frames (default 20), saves the last one, and exits.
     const char* autoShot = nullptr;
     int autoFrames = 20;
+    bool shotWithUI = false;     // screenshots normally leave the panel out
+    bool startOrbit = false;     // --orbit: start with the stars on circular orbits
     for(int i=1;i<argc;++i){
         std::string a = argv[i];
         if(a == "--screenshot" && i+1 < argc){
@@ -1298,6 +1429,9 @@ int main(int argc, char** argv){
         else if(a == "--no-stars")   gShowStars = false;
         else if(a == "--no-bloom")   gBloom = false;
         else if(a == "--spin" && i+1 < argc) gSpin = std::clamp(std::atof(argv[++i]), 0.0, 0.99);
+        else if(a == "--no-ui")      gShowUI = false;
+        else if(a == "--orbit")      startOrbit = true;
+        else if(a == "--shot-ui")    shotWithUI = true;
         else if(a == "--grid" && i+1 < argc) {
             std::string m = argv[++i];
             gGridMode = (m == "off") ? 0 : (m == "overlay" ? 2 : 1);
@@ -1305,6 +1439,8 @@ int main(int argc, char** argv){
     }
 
     initGL();
+    gInitialObjs = gObjs;
+    if (startOrbit) orbitStars();
     int frameCount = 0;
 
     double lastMoveT = glfwGetTime();
@@ -1327,6 +1463,13 @@ int main(int argc, char** argv){
             glfwSetWindowTitle(gWin, title);
             fpsFrames = 0; fpsT0 = frameT;
         }
+
+        // UI first, so slider changes apply to this frame
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        drawUI();
+        ImGui::Render();
 
         // physics + rebuild warped grid (objects may have moved)
         stepGravity(dt);
@@ -1356,8 +1499,11 @@ int main(int argc, char** argv){
         if (gCam.dragging) lastMoveT = now;
         if ((now - lastMoveT) > 0.15) gCam.moving = false;
 
-        // screenshots: P key, or automatic with --screenshot
+        // screenshots: P key / button, or automatic with --screenshot.
+        // Taken before the panel is drawn, unless --shot-ui.
         ++frameCount;
+        auto drawPanel = [](){ ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); };
+        if (shotWithUI) drawPanel();
         if (gScreenshotRequested) {
             char name[64];
             std::snprintf(name, sizeof(name), "screenshot_%lld.bmp", (long long)std::time(nullptr));
@@ -1368,11 +1514,15 @@ int main(int argc, char** argv){
             saveScreenshotBMP(autoShot);
             glfwSetWindowShouldClose(gWin, 1);
         }
+        if (!shotWithUI) drawPanel();
 
         glfwSwapBuffers(gWin);
         glfwPollEvents();
     }
 
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     glfwDestroyWindow(gWin);
     glfwTerminate();
     return 0;

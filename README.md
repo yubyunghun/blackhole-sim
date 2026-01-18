@@ -43,6 +43,13 @@ relativistic effects.
 
 ## Controls
 
+A control panel (top-left; **H** hides it) has sliders for the spin, disk
+temperature, brightness, gas speed, disk size, bloom, exposure and gravity
+time scale. It also has **Orbit stars** (puts the stars on circular orbits)
+and **Reset scene** buttons.
+
+![Control panel](docs/controls.png)
+
 | Input | Action |
 |---|---|
 | Left-drag | Orbit the camera |
@@ -53,7 +60,8 @@ relativistic effects.
 | `B` | Starfield on/off |
 | `L` | Bloom on/off |
 | `T` | Grid: ray traced → off → flat overlay (reference) |
-| `P` | Save a screenshot (`screenshot_<time>.bmp`) |
+| `P` | Save a screenshot (`screenshot_<time>.bmp`, without the panel) |
+| `H` | Show/hide the control panel |
 | `Esc` | Quit |
 
 The window title shows the FPS, the effective samples per pixel, the spin,
@@ -69,8 +77,8 @@ git clone --recursive https://github.com/yubyunghun/blackhole-sim.git
 cd blackhole-sim
 ```
 
-`--recursive` also fetches GLM, which is a git submodule. If you already
-cloned without it, run `git submodule update --init`.
+`--recursive` also fetches GLM and Dear ImGui, which are git submodules. If
+you already cloned without it, run `git submodule update --init`.
 
 Then, from the **x64 Native Tools Command Prompt for VS 2022**:
 
@@ -84,12 +92,14 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ### Command-line options
 
 ```
-main.exe [--screenshot out.bmp [frames]] [--spin 0..0.99] [--gravity] [--flat-disk]
-         [--no-stars] [--no-bloom] [--grid ray|off|overlay]
+main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
+         [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
+         [--no-ui]
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
-one and exits. It's useful for testing.
+one and exits. It's useful for testing. `--shot-ui` includes the panel in the
+screenshot, and `--orbit` starts with the stars on circular orbits.
 
 ## How it works
 
