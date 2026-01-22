@@ -66,12 +66,30 @@ static const double SAG_MASS = 8.54e36;
 static const double SAG_RS   = 2.0 * G_GRAV * SAG_MASS / (C_LIGHT*C_LIGHT);
 
 // ---------- Window / Compute ----------
-// Matches the reference: 800x600 window, 200x150 ray-traced image (4:3 everywhere)
-static int   gWinW = 800, gWinH = 600;
-// Adaptive-step RK4 is ~100x cheaper per ray than the old fixed-step loop,
-// so we can afford much higher resolution. Lower these if your GPU struggles.
-static int   gMovingW = 400, gMovingH = 300;   // res while orbiting
-static int   gStillW  = 800, gStillH  = 600;   // res when idle (full window)
+// The window is resizable; gWinW/gWinH track its framebuffer size.
+static int   gWinW = 1280, gWinH = 720;
+// Ray-traced resolution = window size x render scale. "Auto" picks the scale
+// so the image is at most ~0.5 megapixels, which keeps big or fullscreen
+// windows smooth. The moving-camera preview is half that in each direction.
+static float gRenderScale = 1.0f;     // used when auto is off
+static bool  gAutoScale   = true;
+static const double AUTO_MAX_PIXELS = 500000.0;
+static int   gMovingW = 400, gMovingH = 300;   // res while orbiting (set by updateRenderSizes)
+static int   gStillW  = 800, gStillH  = 600;   // res when idle
+static bool  gFullscreen  = false;   // F11
+
+static float effectiveRenderScale(){
+    if (!gAutoScale) return gRenderScale;
+    double px = double(gWinW) * double(gWinH);
+    return float(std::min(1.0, std::sqrt(AUTO_MAX_PIXELS / std::max(px, 1.0))));
+}
+static void updateRenderSizes(){
+    float s = effectiveRenderScale();
+    gStillW  = std::max(16, int(gWinW * s + 0.5f));
+    gStillH  = std::max(16, int(gWinH * s + 0.5f));
+    gMovingW = std::max(16, gStillW / 2);
+    gMovingH = std::max(16, gStillH / 2);
+}
 
 // Simulated seconds per real second for the N-body gravity.
 // (A star at 4e11 m around Sgr A* has a ~18 h orbit; 1e4 makes that ~7 s.)
@@ -918,14 +936,21 @@ static const float PROG_BLEND_MIN = 0.2f;   // ~5-sample moving average at most
 static int  gPassIndex = 0;        // still-camera passes since the last reset
 static bool gAccumReset = true;
 
-static void initRenderTargets(){
+// (Re)allocate the window-sized images at the current render sizes.
+static void resizeRenderTargets(){
     glBindTexture(GL_TEXTURE_2D, gTexOut);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gMovingW, gMovingH, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glGenTextures(1, &gTexAccum);
     glBindTexture(GL_TEXTURE_2D, gTexAccum);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gStillW, gStillH, 0, GL_RGBA, GL_FLOAT, nullptr);
+    gAccumReset = true;                      // old samples don't fit the new size
+}
+
+static void initRenderTargets(){
+    glGenTextures(1, &gTexAccum);
+    glBindTexture(GL_TEXTURE_2D, gTexAccum);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    resizeRenderTargets();
     glGenTextures(1, &gTexLow);
     glBindTexture(GL_TEXTURE_2D, gTexLow);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, gLowW, gLowH, 0, GL_RGBA, GL_FLOAT, nullptr);
@@ -937,11 +962,11 @@ static void initRenderTargets(){
 // Anything that changes the picture (other than the animated gas, which the
 // moving average handles) restarts the accumulation.
 static bool sceneChanged(){
-    static double last[13] = {};
-    double now[13] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
+    static double last[15] = {};
+    double now[15] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
                        double(gRealDisk), double(gShowStars), double(gGridMode),
-                       double(gObjs.size()), double(gWinW),
-                       gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter };
+                       double(gObjs.size()), double(gWinW), double(gWinH),
+                       double(gStillW), gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter };
     bool changed = std::memcmp(last, now, sizeof(now)) != 0;
     std::memcpy(last, now, sizeof(now));
     return changed;
@@ -1062,15 +1087,16 @@ static float gBloomStrength = 0.9f;
 static float gExposure = 1.0f;
 
 static void makeRT(RT& rt, int w, int h){
+    w = std::max(w, 1); h = std::max(h, 1);
     rt.w = w; rt.h = h;
-    glGenTextures(1, &rt.tex);
+    if (!rt.tex) glGenTextures(1, &rt.tex);       // reused on resize
     glBindTexture(GL_TEXTURE_2D, rt.tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenFramebuffers(1, &rt.fbo);
+    if (!rt.fbo) glGenFramebuffers(1, &rt.fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.tex, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) die("bloom FBO incomplete");
@@ -1078,12 +1104,16 @@ static void makeRT(RT& rt, int w, int h){
     glClear(GL_COLOR_BUFFER_BIT);   // start black, not undefined (avoids NaN when bloom is off)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
+// bloom buffers are half / quarter of the ray-traced (still) resolution
+static void resizeBloom(){
+    makeRT(gBloomA1, gStillW/2, gStillH/2); makeRT(gBloomA2, gStillW/2, gStillH/2);
+    makeRT(gBloomB1, gStillW/4, gStillH/4); makeRT(gBloomB2, gStillW/4, gStillH/4);
+}
 static void initBloom(){
     gProgBright    = makeProg(VS_BLIT, FS_BRIGHT);
     gProgBlur      = makeProg(VS_BLIT, FS_BLUR);
     gProgComposite = makeProg(VS_BLIT, FS_COMPOSITE);
-    makeRT(gBloomA1, gWinW/2, gWinH/2); makeRT(gBloomA2, gWinW/2, gWinH/2);
-    makeRT(gBloomB1, gWinW/4, gWinH/4); makeRT(gBloomB2, gWinW/4, gWinH/4);
+    resizeBloom();
 }
 
 // draw a fullscreen pass sampling `src` into `dst`
@@ -1179,6 +1209,38 @@ static void cursorPosCB(GLFWwindow*, double x, double y){
     gCam.lastX=x; gCam.lastY=y;
     gCam.moving = true;
 }
+// ---------- Window size / fullscreen ----------
+static bool gResized = true;   // apply sizes on the first frame too
+
+// Recompute render sizes and reallocate every size-dependent image.
+static void applyWindowSize(){
+    updateRenderSizes();
+    resizeRenderTargets();
+    resizeBloom();
+    glViewport(0, 0, gWinW, gWinH);
+}
+static void framebufferSizeCB(GLFWwindow*, int w, int h){
+    gWinW = w; gWinH = h;          // 0 x 0 while minimised; the loop pauses then
+    gResized = true;
+}
+
+// F11: borderless fullscreen on the current monitor, and back
+static int gWindowedX = 100, gWindowedY = 100, gWindowedW = 1280, gWindowedH = 720;
+static void setFullscreen(bool on){
+    if (on == gFullscreen) return;
+    if (on) {
+        glfwGetWindowPos(gWin, &gWindowedX, &gWindowedY);
+        glfwGetWindowSize(gWin, &gWindowedW, &gWindowedH);
+        GLFWmonitor* mon = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(mon);
+        glfwSetWindowMonitor(gWin, mon, 0, 0, mode->width, mode->height, mode->refreshRate);
+    } else {
+        glfwSetWindowMonitor(gWin, nullptr, gWindowedX, gWindowedY, gWindowedW, gWindowedH, 0);
+    }
+    glfwSwapInterval(1);           // keep vsync after the mode switch
+    gFullscreen = on;
+}
+
 // True when the mouse/keyboard is being used by the UI panel, so the scene
 // shouldn't react (e.g. dragging a slider must not orbit the camera).
 static bool uiWantsMouse(){ return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse; }
@@ -1207,6 +1269,7 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
     if(action==GLFW_PRESS && key==GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win,1);
     if(action==GLFW_PRESS && key==GLFW_KEY_H) gShowUI = !gShowUI;
     if(action==GLFW_PRESS && key==GLFW_KEY_V) setVideoLook(!gVideoLook);
+    if(action==GLFW_PRESS && key==GLFW_KEY_F11) setFullscreen(!gFullscreen);
     if(action==GLFW_PRESS && key==GLFW_KEY_P) gScreenshotRequested = true;
     if(action==GLFW_PRESS && key==GLFW_KEY_D){
         gRealDisk = !gRealDisk;
@@ -1422,6 +1485,23 @@ static void drawUI(){
         if (ImGui::Button("Reset scene")) resetScene();
     }
 
+    if (ImGui::CollapsingHeader("Display")) {
+        bool fs = gFullscreen;
+        if (ImGui::Checkbox("Fullscreen (F11)", &fs)) setFullscreen(fs);
+        bool autoS = gAutoScale;
+        if (ImGui::Checkbox("Auto resolution", &autoS)) {
+            if (!autoS) gRenderScale = effectiveRenderScale();   // no jump when unticking
+            gAutoScale = autoS;
+            gResized = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keeps the ray-traced image under ~0.5 megapixels");
+        ImGui::BeginDisabled(gAutoScale);
+        float sc = effectiveRenderScale();
+        if (ImGui::SliderFloat("Render scale", &sc, 0.25f, 1.0f, "%.2f")) { gRenderScale = sc; gResized = true; }
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("window %dx%d  render %dx%d", gWinW, gWinH, gStillW, gStillH);
+    }
+
     ImGui::Separator();
     if (ImGui::Button("Screenshot (P)")) gScreenshotRequested = true;
 
@@ -1436,9 +1516,15 @@ static void initGL(){
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
     glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
 
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+
     gWin = glfwCreateWindow(gWinW, gWinH, "Black Hole (compute)", nullptr, nullptr);
     if(!gWin){ die("GLFW window failed"); }
     glfwMakeContextCurrent(gWin);
+    glfwSwapInterval(1);
+    // work in framebuffer pixels (can differ from window size with display scaling)
+    glfwGetFramebufferSize(gWin, &gWinW, &gWinH);
+    updateRenderSizes();
 
     if(!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) die("GLAD load failed");
     pglBindImageTexture = (PFN_BindImageTexture)glfwGetProcAddress("glBindImageTexture");
@@ -1454,6 +1540,7 @@ static void initGL(){
     glfwSetCursorPosCallback(gWin, cursorPosCB);
     glfwSetMouseButtonCallback(gWin, mouseCB);
     glfwSetScrollCallback(gWin, scrollCB);
+    glfwSetFramebufferSizeCallback(gWin, framebufferSizeCB);
     glfwSetKeyCallback(gWin, keyCB);
 
     // Dear ImGui. Installed after our callbacks so it chains to them.
@@ -1495,6 +1582,7 @@ int main(int argc, char** argv){
     bool shotWithUI = false;     // screenshots normally leave the panel out
     bool startOrbit = false;     // --orbit: start with the stars on circular orbits
     bool startVideo = false;     // --video-look
+    bool startFull  = false;     // --fullscreen
     for(int i=1;i<argc;++i){
         std::string a = argv[i];
         if(a == "--screenshot" && i+1 < argc){
@@ -1508,6 +1596,11 @@ int main(int argc, char** argv){
         else if(a == "--no-ui")      gShowUI = false;
         else if(a == "--orbit")      startOrbit = true;
         else if(a == "--video-look") startVideo = true;
+        else if(a == "--fullscreen") startFull = true;
+        else if(a == "--size" && i+1 < argc) {           // e.g. --size 1600x900
+            int w = 0, h = 0;
+            if (std::sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w >= 64 && h >= 64) { gWinW = w; gWinH = h; }
+        }
         else if(a == "--shot-ui")    shotWithUI = true;
         else if(a == "--grid" && i+1 < argc) {
             std::string m = argv[++i];
@@ -1519,11 +1612,16 @@ int main(int argc, char** argv){
     gInitialObjs = gObjs;
     if (startOrbit) orbitStars();
     if (startVideo) setVideoLook(true);
+    if (startFull)  setFullscreen(true);
     int frameCount = 0;
 
     double lastMoveT = glfwGetTime();
     double lastFrameT = glfwGetTime();
     while(!glfwWindowShouldClose(gWin)){
+        // minimised: nothing to draw, wait for the window to come back
+        if (gWinW == 0 || gWinH == 0) { glfwWaitEvents(); lastFrameT = glfwGetTime(); continue; }
+        if (gResized) { applyWindowSize(); gResized = false; }
+
         // background: black, or the video's dark slate (~45,45,50)
         if (gVideoLook) glClearColor(0.18f, 0.18f, 0.20f, 1.0f);
         else            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);

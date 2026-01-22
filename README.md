@@ -37,21 +37,32 @@ relativistic effects.
   paraboloid) is drawn as a grid that light rays actually hit, so it is
   lensed, wraps around the shadow, and is hidden behind the hole.
 - **N-body gravity.** Stars fall toward the hole and are swallowed at the
-  event horizon.
+  event horizon, or can be put on circular orbits.
+- **Resizable window and fullscreen** (`F11`). The ray-traced resolution
+  follows the window. **Auto resolution** caps it at about 0.5 megapixels so
+  large and fullscreen windows stay smooth, and a render-scale slider trades
+  speed for sharpness.
 - **Reference mode** (press `D`) that reproduces the flat orange disk from the
   original project.
 - **Video look** (press `V`) that matches the original project's video. It
-  uses the flat orange disk with colours sampled from the video, a 200×150
-  pixelated render stretched from 4:3 to 16:9, the overlay grid, the slate
-  background and the same camera angle. Turning it off restores your
-  settings.
+  uses:
+  - the flat orange disk, with colours sampled from the video
+  - a 200×150 pixelated render, stretched from 4:3 to 16:9 like the video
+    (exact in a 16:9 window)
+  - the overlay grid, the slate background and the same camera angle
+
+  Turning it off restores your settings.
 
 ## Controls
 
-A control panel (top-left; **H** hides it) has sliders for the spin, disk
-temperature, brightness, gas speed, disk size, bloom, exposure and gravity
-time scale. It also has **Orbit stars** (puts the stars on circular orbits)
-and **Reset scene** buttons.
+A control panel (top-left; **H** hides it) has:
+- sliders for the spin, disk temperature, brightness, gas speed, disk size,
+  bloom, exposure and gravity time scale
+- **Orbit stars** (puts the stars on circular orbits) and **Reset scene**
+  buttons
+- a **Display** section with fullscreen, auto resolution and render scale
+
+The window can be resized freely.
 
 ![Control panel](docs/controls.png)
 
@@ -68,6 +79,7 @@ and **Reset scene** buttons.
 | `P` | Save a screenshot (`screenshot_<time>.bmp`, without the panel) |
 | `H` | Show/hide the control panel |
 | `V` | Video look on/off (match the original video) |
+| `F11` | Fullscreen on/off |
 | `Esc` | Quit |
 
 The window title shows the FPS, the effective samples per pixel, the spin,
@@ -100,12 +112,13 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ```
 main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
-         [--no-ui] [--video-look]
+         [--no-ui] [--video-look] [--size WxH] [--fullscreen]
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
 one and exits. It's useful for testing. `--shot-ui` includes the panel in the
-screenshot, and `--orbit` starts with the stars on circular orbits.
+screenshot, and `--orbit` starts with the stars on circular orbits. `--size`
+sets the starting window size (default `1280x720`).
 
 ## How it works
 
@@ -132,7 +145,9 @@ Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
    `g = 1 / (u_cam · uᵗ · (1 − Ω·L))`. This single factor includes Doppler
    beaming, frame dragging and gravitational redshift. Observed intensity
    scales as `g⁴` and observed temperature as `g · T`.
-5. **Progressive refinement.** With the camera still, each frame traces one
+5. **Progressive refinement.** The image size is the window size × the
+   render scale. While the camera moves, a half-size preview is traced every
+   frame. With the camera still, each frame traces one
    pixel of every 2×2 block, cycling through the four. Each sample is shot
    through a jittered sub-pixel position (Halton sequence) and blended into a
    running average. The blend weight never drops below 0.2, so the animated
