@@ -22,10 +22,18 @@ relativistic effects.
 - **Gravitational lensing.** The far side of the disk appears above and below
   the hole, the photon ring is visible, and the starfield is distorted
   around it.
-- **Relativistic accretion disk.** Orbiting gas with Doppler beaming (the side
-  moving toward you is brighter and bluer) and gravitational redshift.
-  Blackbody colours, with a temperature profile that is hotter toward the
-  inner edge.
+- **Relativistic accretion disk.** A **Novikov–Thorne** thin disk, the
+  standard general-relativistic disk model. It starts at the innermost stable
+  orbit, with a spin-dependent temperature profile. On top of that:
+  - Doppler beaming (the side moving toward you is brighter and bluer)
+  - frame dragging
+  - gravitational redshift
+  - blackbody colours
+
+  Colour and brightness both follow from `g·T`.
+- **Relativistic camera.** Pixel directions are measured in a static
+  observer's local frame, so aberration near the hole is correct. The shadow
+  size matches the analytic formula (see [Physics](#physics)).
 - **Animated gas.** A procedural texture with differential rotation: inner
   rings orbit faster than outer ones.
 - **HDR bloom and ACES tone mapping.**
@@ -56,8 +64,12 @@ relativistic effects.
 ## Controls
 
 A control panel (top-left; **H** hides it) has:
-- sliders for the spin, disk temperature, brightness, gas speed, disk size,
-  bloom, exposure and gravity time scale
+- sliders for the spin, disk peak temperature, brightness, gas speed, disk
+  size, bloom, exposure and gravity time scale
+- a **Physics** readout for the current spin (horizon, ergosphere, photon
+  orbits, ISCO, peak-flux radius, radiative efficiency, horizon rotation
+  period) and a **Relativistic camera** toggle to compare with plain
+  coordinate directions
 - **Orbit stars** (puts the stars on circular orbits) and **Reset scene**
   buttons
 - a **Display** section with fullscreen, auto resolution and render scale
@@ -112,20 +124,69 @@ GLAD and prebuilt GLFW binaries are included in `third_party/`.
 ```
 main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
-         [--no-ui] [--video-look] [--size WxH] [--fullscreen]
+         [--no-ui] [--video-look] [--size WxH] [--fullscreen] [--coord-camera]
+main.exe --physics
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
 one and exits. It's useful for testing. `--shot-ui` includes the panel in the
 screenshot, and `--orbit` starts with the stars on circular orbits. `--size`
-sets the starting window size (default `1280x720`).
+sets the starting window size (default `1280x720`). `--coord-camera` turns off
+the relativistic camera. `--physics` prints the table of Kerr radii and
+efficiencies below and exits.
+
+## Physics
+
+Units: `rs = 2GM/c²` is the Schwarzschild radius, `M = rs/2`, and `a* = a/M`
+is the spin.
+
+**Characteristic radii.** These are computed for the current spin and shown
+in the panel. The output of `main.exe --physics` matches the standard Kerr
+values: horizon `M(1 + √(1 − a*²))`, ISCO 6M → 1.45M at a* = 0.99, and
+efficiency 5.7% → 26.4%.
+
+| a/M | horizon | ergosphere (eq.) | photon orbit pro / retro | ISCO | peak disk flux | efficiency |
+|---|---|---|---|---|---|---|
+| 0.00 | 1.000 rs | 1.000 rs | 1.500 / 1.500 rs | 3.000 rs | 4.775 rs | 5.7 % |
+| 0.50 | 0.933 rs | 1.000 rs | 1.174 / 1.766 rs | 2.117 rs | 3.307 rs | 8.2 % |
+| 0.90 | 0.718 rs | 1.000 rs | 0.779 / 1.955 rs | 1.160 rs | 1.720 rs | 15.6 % |
+| 0.99 | 0.571 rs | 1.000 rs | 0.584 / 1.996 rs | 0.727 rs | 0.988 rs | 26.4 % |
+
+**Novikov–Thorne disk (Page & Thorne 1974).** A thin, optically thick disk
+with no torque at the ISCO radiates a flux
+
+```
+F(r) ∝ 1 / (x⁴ (x³ − 3x + 2a*)) · [ x − x₀ − (3/2) a* ln(x/x₀)
+        − Σᵢ 3(xᵢ − a*)² / (xᵢ (xᵢ − xⱼ)(xᵢ − xₖ)) · ln((x − xᵢ)/(x₀ − xᵢ)) ]
+```
+
+Here `x = √(r/M)`, `x₀ = √(r_isco/M)`, and `x₁, x₂, x₃` are the roots of
+`x³ − 3x + 2a* = 0`. Each ring is a blackbody with `T ∝ F^¼`. A blackbody
+seen with frequency shift `g` is a blackbody at `g·T`, so the colour is
+`blackbody(g·T)` and the brightness is `∝ g⁴·F`. The flux is zero at the
+ISCO, which is why the inner edge glows faintly while the brightest gas sits
+just outside it. With spin 0 the disk starts at 3 rs, leaving a dark gap
+around the shadow. At spin 0.9 it reaches 1.16 rs.
+
+![Spin 0 vs spin 0.9](docs/spin.png)
+
+**Relativistic camera.** The camera is a static observer. Its local frame
+(tetrad) is built by Gram–Schmidt under the Kerr–Schild metric. A pixel with
+direction `n` in that frame is the photon `p = u + nᵣ eᵣ + nᵤ eᵤ + n_f e_f`.
+
+*Check:* for spin 0 at the default distance (11.81 rs), a static observer
+should see a shadow of angular radius
+`sin α = (3√3/2)(rs/r)·√(1 − rs/r)`, i.e. α = 12.15°, or **134.2 px** at
+720 px tall. The renderer measures **133–135 px**. Plain coordinate
+directions (the previous camera, still available with `--coord-camera`) give
+141–143 px, about 5% too large.
 
 ## How it works
 
 Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
 
-1. **Ray setup.** For each pixel, a compute shader builds a ray from the
-   camera.
+1. **Ray setup.** For each pixel, a compute shader builds a photon from the
+   camera's local frame (see [Physics](#physics)).
 2. **Integration.** Rays are integrated in **Kerr–Schild coordinates**.
    These are Cartesian, smooth across the horizon, and have no singularity
    at the poles. The metric is `g = η + f·k⊗k`, so the photon Hamiltonian is
@@ -143,8 +204,9 @@ Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
    whatever lies behind still shows through the gaps.
 4. **Disk shading.** For gas on circular Kerr orbits, the redshift is
    `g = 1 / (u_cam · uᵗ · (1 − Ω·L))`. This single factor includes Doppler
-   beaming, frame dragging and gravitational redshift. Observed intensity
-   scales as `g⁴` and observed temperature as `g · T`.
+   beaming, frame dragging and gravitational redshift. The emitted
+   temperature follows the Novikov–Thorne flux. Observed colour is a
+   blackbody at `g·T`, and brightness scales as `g⁴·F`.
 5. **Progressive refinement.** The image size is the window size × the
    render scale. While the camera moves, a half-size preview is traced every
    frame. With the camera still, each frame traces one

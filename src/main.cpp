@@ -107,12 +107,13 @@ static int   gGridMode = 1;
 static double gSpin = 0.9;
 
 // Disk look (UI panel)
-static float gDiskTemp  = 4500.0f;  // K at r = 2.2 rs
-static float gDiskGain  = 1.5f;     // brightness
+static float gDiskTemp  = 5500.0f;  // peak temperature (K), Novikov-Thorne profile
+static float gDiskGain  = 2.5f;     // brightness
 static float gGasSpeed  = 4.0f;     // gas rotation speed
 static float gDiskOuter = 5.2f;     // outer radius (rs)
 static bool  gShowUI    = true;     // H key
 static bool  gVideoLook = false;    // V key: match the look of the reference video
+static bool  gRelCamera = true;     // relativistic (static-observer tetrad) camera
 static void setVideoLook(bool on);  // defined with the other scene actions
 static const char* kGridModeNames[] = { "off", "ray traced", "flat overlay (reference)" };
 
@@ -354,6 +355,29 @@ void rk4(inout vec3 x, inout vec3 p, float h){
 // directions rays leave in, like the old tracer). Solving dx/dl || d and H = 0:
 //     p = beta d + gamma k,  beta = 1/sqrt(1 - f(1 - c^2)),
 //     gamma = f (1 + beta c)/(1 - f),  c = k.d    (k null => |k| = 1)
+// ---------------------------------------------------------------------------
+// Relativistic camera. A real camera measures directions in its own local
+// orthonormal frame, not in coordinates. The CPU builds the frame (tetrad) of
+// a static observer at the camera (u = time direction, e_f/e_r/e_u =
+// forward/right/up, orthonormal under the Kerr-Schild metric). A pixel with
+// direction n in that frame is the photon  p^mu = u + n_r e_r + n_u e_u + n_f e_f.
+// Lowered with g = eta + f l l (l = (1, k)) and scaled to p_t = -1.
+// This adds the correct aberration near the hole, and matches the static
+// observer already used for the camera's redshift.
+// ---------------------------------------------------------------------------
+uniform int   uRelCamera;            // 1 = tetrad camera, 0 = coordinate directions
+uniform vec4  uCamU, uCamEF, uCamER, uCamEU;   // (t, X, Y, Z), local Kerr-Schild
+uniform float uCamF;                 // f at the camera
+uniform vec3  uCamK;                 // k at the camera
+
+vec3 initMomentumTetrad(vec3 n){     // n = (right, up, forward), unit
+    vec4 P  = uCamU + n.x*uCamER + n.y*uCamEU + n.z*uCamEF;   // contravariant
+    float lp = P.x + dot(uCamK, P.yzw);                       // l_mu p^mu
+    float pt = -P.x + uCamF * lp;                             // p_t
+    vec3  ps = P.yzw + uCamF * uCamK * lp;                    // p_i
+    return ps / (-pt);                                        // energy 1
+}
+
 vec3 initMomentum(vec3 x, vec3 d){
     float r = ksR(x);
     float f = ksF(x);
@@ -461,7 +485,7 @@ float gasAt(float r, float phi){
 // resets while invisible.
 // Disk look, set from the UI panel
 uniform float uGasSpeed;     // angular speed scale (rad/s at r = 1 rs), default 4
-uniform float uDiskTemp;     // emitted temperature (K) at r = 2.2 rs, default 4500
+uniform float uDiskTemp;     // peak disk temperature (K), Novikov-Thorne profile
 uniform float uDiskGain;     // brightness multiplier, default 1.5
 const float FLOW_P = 4.0;    // seconds per flow cycle
 float gasDensity(float r, float phi, float t){
@@ -498,21 +522,49 @@ float kerrDiskG(float r, float aPhys, float Lphoton, float fCam){
     return 1.0 / (uCam * ut * max(1.0 - Om*Lphoton, 1e-3));
 }
 
-// r: Boyer-Lindquist radius of the hit; pc: hit point (world, rs units)
+// ---------------------------------------------------------------------------
+// Novikov-Thorne thin disk (Page & Thorne 1974): the radiated flux of a
+// geometrically thin, optically thick disk in the Kerr metric, with zero
+// torque at the ISCO. In units of M, with x = sqrt(r/M), x0 = sqrt(r_isco/M)
+// and x1,x2,x3 the roots of x^3 - 3x + 2a* = 0:
+//   F(r) ~ 1/(x^4 (x^3 - 3x + 2a*)) * [ x - x0 - 3/2 a* ln(x/x0)
+//          - sum_i 3(x_i - a*)^2 / (x_i (x_i - x_j)(x_i - x_k)) ln((x - x_i)/(x0 - x_i)) ]
+// F is zero at the ISCO, peaks just outside it, and falls off as r^-3 far out.
+// Each ring radiates as a blackbody: T_eff ~ F^(1/4).
+// ---------------------------------------------------------------------------
+uniform vec4 uNT;   // x = a* (spin a/M), y = x0 = sqrt(r_isco/M), z = 1 / F_max
+const float PI = 3.14159265;
+
+float ntFlux(float r_rs){
+    float aS = max(uNT.x, 1e-4);           // a* = 0 is a removable 0/0 in the x2 term
+    float x0 = uNT.y;
+    float x  = sqrt(2.0 * r_rs);           // r/M = 2 r/rs
+    if (x <= x0) return 0.0;
+    float th = acos(aS);
+    float x1 =  2.0 * cos((th - PI) / 3.0);
+    float x2 =  2.0 * cos((th + PI) / 3.0);
+    float x3 = -2.0 * cos(th / 3.0);
+    float s = x - x0 - 1.5 * aS * log(x / x0)
+            - 3.0*(x1-aS)*(x1-aS) / (x1*(x1-x2)*(x1-x3)) * log((x-x1)/(x0-x1))
+            - 3.0*(x2-aS)*(x2-aS) / (x2*(x2-x1)*(x2-x3)) * log((x-x2)/(x0-x2))
+            - 3.0*(x3-aS)*(x3-aS) / (x3*(x3-x1)*(x3-x2)) * log((x-x3)/(x0-x3));
+    return max(s, 0.0) / (x*x*x*x * (x*x*x - 3.0*x + 2.0*aS));
+}
+
+// r: Boyer-Lindquist radius of the hit; pc: hit point (world, rs units);
+// g: observed/emitted frequency ratio (Doppler + frame dragging + gravity)
 vec4 diskColorRelativistic(vec3 pc, float r, float g, float r1, float r2, float t){
-
-    // emitted temperature falls off ~ r^-3/4 (thin-disk profile)
-    // profiles are anchored at a fixed radius (2.2 rs), not the inner edge, so
-    // spin (which moves the ISCO inward) adds hotter gas instead of dimming the rest
-    const float R_REF = 2.2;
-    float T = uDiskTemp * pow(r / R_REF, -0.75);
+    float F = ntFlux(r) * uNT.z;            // 0..1, peak = 1
+    float T = uDiskTemp * pow(F, 0.25);     // uDiskTemp = peak temperature
+    // A blackbody at T seen with shift g is a blackbody at g*T (I_nu / nu^3 is
+    // invariant), so colour = blackbody(g T) and bolometric brightness ~ (g T)^4,
+    // i.e. g^4 * F. Brightness and colour now come from the same physics.
     vec3 col = blackbody(T * g);
-
     float gas = gasDensity(r, atan(pc.z, pc.x), t);
-    float I = pow(g, 4.0) * pow(R_REF / r, 1.5) * (0.25 + 1.6 * gas);
-    vec3 c = col * I * uDiskGain;                 // linear HDR; tone mapped later
-    // opaque disk with soft inner/outer edges (premultiplied alpha)
-    float edge = smoothstep(r2, r2 - 0.6, r) * smoothstep(r1, r1 + 0.15, r);
+    float I = pow(g, 4.0) * F * (0.25 + 1.6 * gas);
+    vec3 c = col * I * uDiskGain;           // linear HDR; tone mapped later
+    // opaque disk; the inner edge already fades to zero flux at the ISCO
+    float edge = smoothstep(r2, r2 - 0.6, r);
     return vec4(c * edge, edge);
 }
 
@@ -590,7 +642,8 @@ void main(){
         writeSample(pix, vec4(0,0,0,1), WIDTH, HEIGHT);
         return;
     }
-    vec3 pl = initMomentum(xl, dir.zxy);
+    vec3 pl = (uRelCamera == 1) ? initMomentumTetrad(normalize(vec3(u, -v_, 1.0)))
+                                : initMomentum(xl, dir.zxy);
     // photon angular momentum about the spin axis (conserved). The traced ray
     // runs backwards in time, so the physical photon's is the negative.
     float Lphys = -(xl.x*pl.y - xl.y*pl.x);
@@ -877,6 +930,63 @@ static double iscoOverM(double chi){
     return 3.0 + z2 - std::sqrt((3.0 - z1) * (3.0 + z1 + 2.0*z2));
 }
 
+// Novikov-Thorne flux (same formula as the shader, in double; arbitrary units)
+static double ntFluxCPU(double rOverM, double aS, double x0){
+    aS = std::max(aS, 1e-4);
+    double x = std::sqrt(rOverM);
+    if (x <= x0) return 0.0;
+    double th = std::acos(aS);
+    double x1 =  2.0*std::cos((th - M_PI)/3.0);
+    double x2 =  2.0*std::cos((th + M_PI)/3.0);
+    double x3 = -2.0*std::cos(th/3.0);
+    double s = x - x0 - 1.5*aS*std::log(x/x0)
+             - 3.0*(x1-aS)*(x1-aS)/(x1*(x1-x2)*(x1-x3))*std::log((x-x1)/(x0-x1))
+             - 3.0*(x2-aS)*(x2-aS)/(x2*(x2-x1)*(x2-x3))*std::log((x-x2)/(x0-x2))
+             - 3.0*(x3-aS)*(x3-aS)/(x3*(x3-x1)*(x3-x2))*std::log((x-x3)/(x0-x3));
+    return std::max(s, 0.0) / (x*x*x*x * (x*x*x - 3.0*x + 2.0*aS));
+}
+
+// Characteristic radii and numbers of the Kerr black hole for the current spin.
+// Radii in units of rs (= 2M).
+struct KerrInfo {
+    double a;          // spin parameter a (rs units) = chi * M
+    double rPlus;      // event horizon
+    double rErgoEq;    // ergosphere at the equator (always 2M)
+    double rPhPro, rPhRetro;   // circular photon orbits (prograde / retrograde)
+    double rIsco;      // innermost stable circular orbit (prograde)
+    double rFluxPeak;  // radius of peak Novikov-Thorne flux
+    double fluxMax;    // peak flux (for normalisation)
+    double efficiency; // radiative efficiency 1 - E_isco
+    double horizonPeriod; // rotation period of the horizon (s), for Sgr A*'s mass
+};
+static KerrInfo kerrInfo(double chi){
+    const double M = 0.5;
+    KerrInfo k{};
+    k.a        = chi * M;
+    k.rPlus    = M + std::sqrt(M*M - k.a*k.a);
+    k.rErgoEq  = 2.0 * M;
+    k.rPhPro   = 2.0*M * (1.0 + std::cos(2.0/3.0 * std::acos(-chi)));
+    k.rPhRetro = 2.0*M * (1.0 + std::cos(2.0/3.0 * std::acos( chi)));
+    double riM = iscoOverM(chi);
+    k.rIsco    = riM * M;
+    k.efficiency = 1.0 - std::sqrt(1.0 - 2.0/(3.0*riM));
+    // peak flux: scan outward from the ISCO
+    double x0 = std::sqrt(riM), best = 0.0, bestR = riM;
+    for (int i = 1; i <= 4000; ++i) {
+        double rM = riM * std::pow(40.0, i / 4000.0);
+        double F = ntFluxCPU(rM, chi, x0);
+        if (F > best) { best = F; bestR = rM; }
+    }
+    k.fluxMax   = best;
+    k.rFluxPeak = bestR * M;
+    // horizon angular velocity  Omega_H M = chi / (2 (1 + sqrt(1 - chi^2)))
+    // converted to seconds with the time unit GM/c^3 (~21 s for Sgr A*)
+    double tM = G_GRAV * SAG_MASS / (C_LIGHT*C_LIGHT*C_LIGHT);
+    double omegaHM = chi / (2.0 * (1.0 + std::sqrt(1.0 - chi*chi)));
+    k.horizonPeriod = (omegaHM > 0.0) ? 2.0*M_PI * tM / omegaHM : 0.0;
+    return k;
+}
+
 struct DiskUBO { vec4 disk; vec4 kerr; }; // (r1, r2, rs, time), (a, r+, -, -)
 static void uploadDiskUBO(){
     DiskUBO d{};
@@ -887,8 +997,11 @@ static void uploadDiskUBO(){
     const double M = 0.5;
     double a     = gSpin * M;
     double rPlus = M + std::sqrt(M*M - a*a);
-    // Inner edge: the reference's 2.2 rs, or the ISCO if spin pulls it closer
-    double r1 = std::min(2.2, iscoOverM(gSpin) * M);
+    // Inner edge: the relativistic (Novikov-Thorne) disk starts exactly at the
+    // ISCO. The reference/video looks keep the original 2.2 rs (or the ISCO if
+    // spin pulls it closer).
+    double isco = iscoOverM(gSpin) * M;
+    double r1 = (gRealDisk && !gVideoLook) ? isco : std::min(2.2, isco);
     d.disk = vec4(float(SAG_RS*r1), float(SAG_RS*gDiskOuter), float(SAG_RS), t);
     d.kerr = vec4(float(a), float(rPlus), 0.0f, 0.0f);
     glBindBuffer(GL_UNIFORM_BUFFER, gUBODisk);
@@ -962,11 +1075,12 @@ static void initRenderTargets(){
 // Anything that changes the picture (other than the animated gas, which the
 // moving average handles) restarts the accumulation.
 static bool sceneChanged(){
-    static double last[15] = {};
-    double now[15] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
+    static double last[16] = {};
+    double now[16] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
                        double(gRealDisk), double(gShowStars), double(gGridMode),
                        double(gObjs.size()), double(gWinW), double(gWinH),
-                       double(gStillW), gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter };
+                       double(gStillW), gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter,
+                       double(gRelCamera) };
     bool changed = std::memcmp(last, now, sizeof(now)) != 0;
     std::memcpy(last, now, sizeof(now));
     return changed;
@@ -985,6 +1099,55 @@ static int progressiveSamples(){
     int n = std::max(1, gPassIndex / (PROG_STRIDE*PROG_STRIDE));
     int cap = int((2.0f - PROG_BLEND_MIN) / PROG_BLEND_MIN + 0.5f);
     return std::min(n, cap);
+}
+
+// ---------- Physics uniforms: Novikov-Thorne disk + relativistic camera ----------
+// Static-observer tetrad at the camera, in local Kerr-Schild coords (t,X,Y,Z),
+// for the spin used in the integration (A = -a, see the shader). Built by
+// Gram-Schmidt under g = eta + f l l, l = (1, k).
+static void setPhysicsUniforms(){
+    GLuint P = gProgComp;
+    KerrInfo K = kerrInfo(gSpin);
+    glUniform4f(glGetUniformLocation(P, "uNT"), float(gSpin),
+                float(std::sqrt(K.rIsco / 0.5)), float(1.0 / std::max(K.fluxMax, 1e-30)), 0.0f);
+
+    // camera basis in world space (same as uploadCameraUBO)
+    dvec3 pos = dvec3(gCam.position()) / SAG_RS;
+    dvec3 fwd = normalize(dvec3(gCam.target) / SAG_RS - pos);
+    dvec3 right = normalize(cross(fwd, dvec3(0,1,0)));
+    dvec3 up = cross(right, fwd);
+    auto toLocal = [](dvec3 w){ return dvec3(w.z, w.x, w.y); };   // local = world.zxy
+
+    // Kerr-Schild f and k at the camera (spin A = -a)
+    const double M = 0.5;
+    double A = -gSpin * M, a2 = A*A;
+    dvec3 x = toLocal(pos);
+    double w = dot(x,x) - a2;
+    double r = std::sqrt(0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)));
+    double f = 2.0*M*r*r*r / (r*r*r*r + a2*x.z*x.z);
+    dvec3 k((r*x.x + A*x.y)/(r*r + a2), (r*x.y - A*x.x)/(r*r + a2), x.z/r);
+    dvec4 l(1.0, k.x, k.y, k.z);                       // covariant null vector
+
+    bool ok = f < 0.98;   // static observers exist only outside the ergosphere
+    glUniform1i(glGetUniformLocation(P, "uRelCamera"), (gRelCamera && ok) ? 1 : 0);
+    if (!ok) return;
+
+    auto g = [&](const dvec4& p, const dvec4& q){        // metric inner product
+        double eta = -p.x*q.x + p.y*q.y + p.z*q.z + p.w*q.w;
+        return eta + f * dot(l, p) * dot(l, q);
+    };
+    dvec4 u(1.0 / std::sqrt(1.0 - f), 0, 0, 0);          // static observer, g(u,u) = -1
+    auto spatial = [&](dvec3 v){ dvec4 V(0.0, v.x, v.y, v.z); return V + g(u, V) * u; };
+    auto unit = [&](dvec4 v){ return v / std::sqrt(g(v, v)); };
+    dvec4 eF = unit(spatial(toLocal(fwd)));
+    dvec4 eR = spatial(toLocal(right)); eR = unit(eR - g(eR, eF) * eF);
+    dvec4 eU = spatial(toLocal(up));    eU = unit(eU - g(eU, eF) * eF - g(eU, eR) * eR);
+
+    auto set4 = [&](const char* n, dvec4 v){
+        glUniform4f(glGetUniformLocation(P, n), float(v.x), float(v.y), float(v.z), float(v.w)); };
+    set4("uCamU", u); set4("uCamEF", eF); set4("uCamER", eR); set4("uCamEU", eU);
+    glUniform1f(glGetUniformLocation(P, "uCamF"), float(f));
+    glUniform3f(glGetUniformLocation(P, "uCamK"), float(k.x), float(k.y), float(k.z));
 }
 
 // ---------- Compute dispatch ----------
@@ -1024,6 +1187,7 @@ static void dispatchCompute(){
     glUniform1f(glGetUniformLocation(gProgComp, "uDiskTemp"), gDiskTemp);
     glUniform1f(glGetUniformLocation(gProgComp, "uDiskGain"), gDiskGain);
     glUniform1f(glGetUniformLocation(gProgComp, "uGasSpeed"), gGasSpeed);
+    setPhysicsUniforms();
 
     glBindImageTexture(0, target, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
 
@@ -1261,7 +1425,8 @@ static void mouseCB(GLFWwindow* w, int button, int action, int){
 static void scrollCB(GLFWwindow*, double, double yoff){
     if(uiWantsMouse()) return;
     gCam.radius -= float(yoff) * float(gCam.zoomSpeed);
-    gCam.radius = std::clamp(gCam.radius, 1e10f, 1e12f);
+    // stay outside the ergosphere (1 rs ~ 1.27e10 m), where a static camera can exist
+    gCam.radius = std::clamp(gCam.radius, 2e10f, 1e12f);
     gCam.moving = true;
 }
 static void keyCB(GLFWwindow* win, int key, int, int action, int){
@@ -1402,14 +1567,15 @@ static void orbitStars(){
 
 // "Video look": reproduce the reference video. Saves the user's settings so
 // turning it off puts everything back.
-struct SavedLook { double spin; bool realDisk, stars, bloom; int grid; };
+struct SavedLook { double spin; bool realDisk, stars, bloom, relCam; int grid; };
 static SavedLook gSavedLook;
 
 static void setVideoLook(bool on){
     if (on == gVideoLook) return;
     if (on) {
-        gSavedLook = { gSpin, gRealDisk, gShowStars, gBloom, gGridMode };
+        gSavedLook = { gSpin, gRealDisk, gShowStars, gBloom, gRelCamera, gGridMode };
         gSpin = 0.0;            // the video's black hole doesn't spin
+        gRelCamera = false;     // the original uses plain coordinate directions
         gRealDisk = false;      // flat disk, no Doppler
         gShowStars = false;
         gBloom = false;
@@ -1421,6 +1587,7 @@ static void setVideoLook(bool on){
     } else {
         gSpin = gSavedLook.spin; gRealDisk = gSavedLook.realDisk;
         gShowStars = gSavedLook.stars; gBloom = gSavedLook.bloom; gGridMode = gSavedLook.grid;
+        gRelCamera = gSavedLook.relCam;
     }
     gVideoLook = on;
 }
@@ -1444,15 +1611,34 @@ static void drawUI(){
     if (ImGui::CollapsingHeader("Black hole", ImGuiTreeNodeFlags_DefaultOpen)) {
         float spin = float(gSpin);
         if (ImGui::SliderFloat("Spin a/M", &spin, 0.0f, 0.99f, "%.2f")) gSpin = spin;
-        double M = 0.5, a = gSpin * M;
-        ImGui::TextDisabled("horizon %.2f rs   ISCO %.2f rs",
-                            M + std::sqrt(M*M - a*a), iscoOverM(gSpin) * M);
+        ImGui::Checkbox("Relativistic camera", &gRelCamera);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pixel directions measured in a static observer's\n"
+                              "local frame (correct aberration), instead of\n"
+                              "plain coordinate directions");
+        if (ImGui::TreeNode("Physics")) {
+            KerrInfo K = kerrInfo(gSpin);
+            ImGui::TextDisabled("radii in rs (Schwarzschild radius)");
+            ImGui::Text("Event horizon      %.3f", K.rPlus);
+            ImGui::Text("Ergosphere (eq.)   %.3f", K.rErgoEq);
+            ImGui::Text("Photon orbit pro   %.3f", K.rPhPro);
+            ImGui::Text("Photon orbit retro %.3f", K.rPhRetro);
+            ImGui::Text("ISCO (disk edge)   %.3f", K.rIsco);
+            ImGui::Text("Peak disk flux     %.3f", K.rFluxPeak);
+            ImGui::Text("Radiative eff.     %.1f %%", 100.0 * K.efficiency);
+            if (K.horizonPeriod > 0.0)
+                ImGui::Text("Horizon spin period %.0f s", K.horizonPeriod);
+            else
+                ImGui::Text("Horizon spin period  -");
+            ImGui::TextDisabled("(period for Sgr A*'s mass, 4.3e6 Msun)");
+            ImGui::TreePop();
+        }
     }
 
     if (ImGui::CollapsingHeader("Accretion disk", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Relativistic (D)", &gRealDisk);
         ImGui::BeginDisabled(!gRealDisk);
-        ImGui::SliderFloat("Temperature K", &gDiskTemp, 2000.0f, 12000.0f, "%.0f");
+        ImGui::SliderFloat("Peak temp K", &gDiskTemp, 2000.0f, 15000.0f, "%.0f");
         ImGui::SliderFloat("Brightness", &gDiskGain, 0.2f, 6.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("Gas speed", &gGasSpeed, 0.0f, 12.0f, "%.1f");
         ImGui::EndDisabled();
@@ -1597,6 +1783,18 @@ int main(int argc, char** argv){
         else if(a == "--orbit")      startOrbit = true;
         else if(a == "--video-look") startVideo = true;
         else if(a == "--fullscreen") startFull = true;
+        else if(a == "--coord-camera") gRelCamera = false;
+        else if(a == "--physics") {          // print the Kerr numbers for a few spins and exit
+            std::printf("%-6s %-8s %-8s %-8s %-8s %-8s %-8s %-7s %s\n", "a/M", "horizon", "ergo",
+                        "ph-pro", "ph-ret", "ISCO", "F-peak", "eff%", "horizon period");
+            for (double chi : {0.0, 0.5, 0.9, 0.99}) {
+                KerrInfo K = kerrInfo(chi);
+                std::printf("%-6.2f %-8.3f %-8.3f %-8.3f %-8.3f %-8.3f %-8.3f %-7.1f %.0f s\n", chi, K.rPlus,
+                            K.rErgoEq, K.rPhPro, K.rPhRetro, K.rIsco, K.rFluxPeak, 100.0*K.efficiency,
+                            K.horizonPeriod);
+            }
+            return 0;
+        }
         else if(a == "--size" && i+1 < argc) {           // e.g. --size 1600x900
             int w = 0, h = 0;
             if (std::sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w >= 64 && h >= 64) { gWinW = w; gWinH = h; }
