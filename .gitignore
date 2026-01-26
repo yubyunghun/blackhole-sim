@@ -14,3 +14,8 @@
 
 # Screenshots saved with the P key / --screenshot
 *.bmp
+
+# CMake build folders
+build/
+build-*/
+out/

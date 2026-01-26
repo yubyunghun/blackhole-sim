@@ -92,15 +92,17 @@ The window can be resized freely.
 | `H` | Show/hide the control panel |
 | `V` | Video look on/off (match the original video) |
 | `F11` | Fullscreen on/off |
+| `F5` | Reload the shaders from disk (edit GLSL without restarting) |
 | `Esc` | Quit |
 
 The window title shows the FPS, the effective samples per pixel, the spin,
 and whether gravity is on.
 
-## Building (Windows, MSVC)
+## Building
 
-Requirements: Visual Studio 2022 or the Build Tools with the C++ workload,
-and a GPU with OpenGL 4.3 (needed for compute shaders).
+Requirements:
+- a C++17 compiler
+- a GPU with OpenGL 4.3 (needed for compute shaders)
 
 ```bat
 git clone --recursive https://github.com/yubyunghun/blackhole-sim.git
@@ -110,14 +112,32 @@ cd blackhole-sim
 `--recursive` also fetches GLM and Dear ImGui, which are git submodules. If
 you already cloned without it, run `git submodule update --init`.
 
-Then, from the **x64 Native Tools Command Prompt for VS 2022**:
+### CMake (Windows or Linux)
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+- **Windows:** uses the prebuilt GLFW in `third_party/`.
+- **Linux:** uses the system GLFW (`sudo apt install libglfw3-dev`).
+
+The executable is `build/blackhole_sim` (on Windows, `build/Release/` with
+Visual Studio generators), with the shaders copied next to it. The CMake build
+is tested with MSVC + Ninja; Linux is set up but untested. macOS isn't
+supported because it stops at OpenGL 4.1, which has no compute shaders.
+
+### Windows without CMake
+
+From the **x64 Native Tools Command Prompt for VS 2022**:
 
 ```bat
 build_msvc.bat
 run.bat
 ```
 
-GLAD and prebuilt GLFW binaries are included in `third_party/`.
+This builds `main.exe` in the repo root. GLAD and prebuilt GLFW binaries are
+included in `third_party/`.
 
 ### Command-line options
 
@@ -183,7 +203,19 @@ directions (the previous camera, still available with `--coord-camera`) give
 
 ## How it works
 
-Everything is in [`src/main.cpp`](src/main.cpp), including the shaders.
+| File | What's in it |
+|---|---|
+| [`src/shaders/geodesic.comp`](src/shaders/geodesic.comp) | **The ray tracer:** Kerr geodesics, disk, stars, grid, sky |
+| [`src/physics.cpp`](src/physics.cpp) | Kerr radii, Novikov–Thorne flux, N-body gravity |
+| [`src/render.cpp`](src/render.cpp) | Shader loading, render targets, progressive rendering, camera tetrad, bloom |
+| [`src/ui.cpp`](src/ui.cpp) | The control panel |
+| [`src/main.cpp`](src/main.cpp) | Window, input, command line, main loop |
+| [`src/common.hpp`](src/common.hpp) | Shared settings and declarations |
+| `src/shaders/*.vert, *.frag` | Fullscreen blit, overlay grid, bloom and composite passes |
+
+Shaders are loaded at runtime from `shaders/` next to the executable, or from
+`src/shaders/`. Press **F5** to reload them after editing. If one fails to
+compile, the error is printed and the old shaders keep running.
 
 1. **Ray setup.** For each pixel, a compute shader builds a photon from the
    camera's local frame (see [Physics](#physics)).

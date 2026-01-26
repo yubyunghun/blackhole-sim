@@ -1,7 +1,9 @@
 @echo off
 setlocal
-REM Build main.exe: main.cpp + GLAD + Dear ImGui, linked against GLFW.
+REM Build main.exe in the repo root: src\*.cpp + GLAD + Dear ImGui, linked
+REM against GLFW. Shaders are loaded at runtime from src\shaders\.
 REM Run this from: "x64 Native Tools Command Prompt for VS 2022"
+REM (Alternatively use CMake, see README.)
 
 set CLFLAGS=/nologo /O2 /MD /std:c++17 /EHsc ^
  /Ithird_party\glad\include ^
@@ -28,5 +30,5 @@ if not exist third_party\imgui\imgui.cpp (
 
 del /q *.obj 2>nul
 
-cl %CLFLAGS% src\main.cpp third_party\glad\src\glad.c %IMGUI% /link %LFLAGS% /out:main.exe
+cl %CLFLAGS% src\main.cpp src\physics.cpp src\render.cpp src\ui.cpp third_party\glad\src\glad.c %IMGUI% /link %LFLAGS% /out:main.exe
 endlocal
