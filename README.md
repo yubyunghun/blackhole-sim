@@ -201,6 +201,13 @@ should see a shadow of angular radius
 directions (the previous camera, still available with `--coord-camera`) give
 141–143 px, about 5% too large.
 
+## License
+
+The code in this repository is released under the [MIT License](LICENSE). It
+began as a port of [kavan010/black_hole](https://github.com/kavan010/black_hole).
+Third-party libraries keep their own licenses: see
+[third_party/LICENSES.md](third_party/LICENSES.md).
+
 ## How it works
 
 | File | What's in it |
