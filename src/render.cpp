@@ -244,7 +244,8 @@ static void uploadDiskUBO(){
     DiskUBO d{};
     // w = animation time; wrapped so float precision stays good in long sessions
     // (wrap period is a multiple of the 4 s flow cycle, so it's seamless for the flow)
-    float t = float(std::fmod(glfwGetTime(), 4000.0));
+    double now = (gTimeOverride >= 0.0) ? gTimeOverride : glfwGetTime();
+    float t = float(std::fmod(now, 4000.0));
     // In rs units M = 0.5. Spin parameter a = chi*M, horizon r+ = M + sqrt(M^2 - a^2).
     const double M = 0.5;
     double a     = gSpin * M;

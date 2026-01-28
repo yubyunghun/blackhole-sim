@@ -145,6 +145,10 @@ inline vector<ObjectData> gObjs = {
 };
 inline vector<ObjectData> gInitialObjs;   // captured at startup for "Reset scene"
 
+// Animation clock override (seconds). < 0: use the real clock. Recording
+// (--record) sets it per frame so the gas moves smoothly and repeatably.
+inline double gTimeOverride = -1.0;
+
 inline GLFWwindow* gWin = nullptr;
 inline std::string gExeDir;               // folder of the executable (for finding shaders/)
 

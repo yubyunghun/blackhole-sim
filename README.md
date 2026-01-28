@@ -5,7 +5,7 @@ light ray traced backwards through curved spacetime on the GPU, so the
 lensing, the warped accretion disk and the black hole's shadow all come out of
 the physics rather than being painted on.
 
-![Black hole with a Doppler-beamed accretion disk and a lensed starfield](docs/screenshot.png)
+![Orbiting a spinning black hole: lensed accretion disk, starfield and spacetime grid](docs/demo.gif)
 
 Based on [kavan010/black_hole](https://github.com/kavan010/black_hole) and
 [its video](https://youtu.be/8-B6ryuBkCM), with a faster integrator and extra
@@ -151,7 +151,16 @@ main.exe --physics
 `--screenshot` renders the given number of frames (default 20), saves the last
 one and exits. It's useful for testing. `--shot-ui` includes the panel in the
 screenshot, and `--orbit` starts with the stars on circular orbits. `--size`
-sets the starting window size (default `1280x720`). `--coord-camera` turns off
+sets the starting window size (default `1280x720`).
+
+`--record <folder> [frames]` flies the camera once around the hole (default 72
+frames). It saves `frame_0000.bmp`, … with each frame refined over 12
+progressive passes, and the animation clock advances 1/15 s per frame.
+That's how [`docs/demo.gif`](docs/demo.gif) was made:
+
+```bat
+main.exe --record frames 72
+``` `--coord-camera` turns off
 the relativistic camera. `--physics` prints the table of Kerr radii and
 efficiencies below and exits.
 

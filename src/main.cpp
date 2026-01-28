@@ -213,6 +213,10 @@ int main(int argc, char** argv){
     bool startOrbit = false;     // --orbit: start with the stars on circular orbits
     bool startVideo = false;     // --video-look
     bool startFull  = false;     // --fullscreen
+    // --record <folder> [frames]: one full orbit around the hole, one image per
+    // frame (frame_0000.bmp ...), each refined over several progressive passes.
+    std::string recordDir;
+    int recordFrames = 72;
     for(int i=1;i<argc;++i){
         std::string a = argv[i];
         if(a == "--screenshot" && i+1 < argc){
@@ -234,6 +238,10 @@ int main(int argc, char** argv){
             if (std::sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w >= 64 && h >= 64) { gWinW = w; gWinH = h; }
         }
         else if(a == "--shot-ui")    shotWithUI = true;
+        else if(a == "--record" && i+1 < argc) {
+            recordDir = argv[++i];
+            if(i+1 < argc && std::isdigit((unsigned char)argv[i+1][0])) recordFrames = std::max(1, std::atoi(argv[++i]));
+        }
         else if(a == "--grid" && i+1 < argc) {
             std::string m = argv[++i];
             gGridMode = (m == "off") ? 0 : (m == "overlay" ? 2 : 1);
@@ -246,6 +254,18 @@ int main(int argc, char** argv){
     if (startVideo) setVideoLook(true);
     if (startFull)  setFullscreen(true);
     int frameCount = 0;
+
+    // recording state
+    const int REC_PASSES = 12;          // 3 jittered samples per pixel (2x2 progressive)
+    const double REC_FPS = 15.0;        // animation clock step per recorded frame
+    int recPass = 0, recFrame = 0;
+    const float recAz0 = gCam.azimuth;
+    if (!recordDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(recordDir, ec);
+        gShowUI = false;
+        gTimeOverride = 0.0;
+    }
 
     double lastMoveT = glfwGetTime();
     double lastFrameT = glfwGetTime();
@@ -303,6 +323,16 @@ int main(int argc, char** argv){
         if (autoShot && frameCount >= autoFrames) {
             saveScreenshotBMP(autoShot);
             glfwSetWindowShouldClose(gWin, 1);
+        }
+        if (!recordDir.empty() && ++recPass >= REC_PASSES) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "frame_%04d.bmp", recFrame);
+            saveScreenshotBMP((std::filesystem::path(recordDir) / name).string().c_str());
+            recPass = 0;
+            if (++recFrame >= recordFrames) glfwSetWindowShouldClose(gWin, 1);
+            // next frame: step around the orbit and advance the animation clock
+            gCam.azimuth  = recAz0 + float(2.0 * M_PI * recFrame / recordFrames);
+            gTimeOverride = recFrame / REC_FPS;
         }
         if (!shotWithUI) drawPanel();
 
