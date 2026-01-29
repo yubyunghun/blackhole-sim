@@ -232,6 +232,7 @@ int main(int argc, char** argv){
         else if(a == "--video-look") startVideo = true;
         else if(a == "--fullscreen") startFull = true;
         else if(a == "--coord-camera") gRelCamera = false;
+        else if(a == "--time" && i+1 < argc) gTimeOverride = std::max(0.0, std::atof(argv[++i]));  // freeze the animation clock
         else if(a == "--physics")    { printPhysicsTable(); return 0; }
         else if(a == "--size" && i+1 < argc) {           // e.g. --size 1600x900
             int w = 0, h = 0;
