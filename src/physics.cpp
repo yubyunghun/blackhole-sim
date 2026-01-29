@@ -27,6 +27,38 @@ static double ntFluxCPU(double rOverM, double aS, double x0){
     return std::max(s, 0.0) / (x*x*x*x * (x*x*x - 3.0*x + 2.0*aS));
 }
 
+double ntFlux(double rOverM, double chi){
+    return ntFluxCPU(rOverM, chi, std::sqrt(iscoOverM(chi)));
+}
+
+// ---------- Camera tetrad ----------
+double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q){
+    dvec4 l(1.0, T.k.x, T.k.y, T.k.z);
+    double eta = -p.x*q.x + p.y*q.y + p.z*q.z + p.w*q.w;
+    return eta + T.f * dot(l, p) * dot(l, q);
+}
+
+// Gram-Schmidt of the static observer's frame under g = eta + f l l.
+CameraTetrad cameraTetrad(dvec3 x, dvec3 fwd, dvec3 right, dvec3 up, double A){
+    const double M = 0.5;
+    CameraTetrad T{};
+    double a2 = A*A;
+    double w = dot(x,x) - a2;
+    double r = std::sqrt(0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)));
+    T.f = 2.0*M*r*r*r / (r*r*r*r + a2*x.z*x.z);
+    T.k = dvec3((r*x.x + A*x.y)/(r*r + a2), (r*x.y - A*x.x)/(r*r + a2), x.z/r);
+    T.ok = T.f < 0.98;      // static observers exist only outside the ergosphere
+    if (!T.ok) return T;
+
+    T.u = dvec4(1.0 / std::sqrt(1.0 - T.f), 0, 0, 0);   // g(u,u) = -1
+    auto spatial = [&](dvec3 v){ dvec4 V(0.0, v.x, v.y, v.z); return V + ksDot(T, T.u, V) * T.u; };
+    auto unit = [&](dvec4 v){ return v / std::sqrt(ksDot(T, v, v)); };
+    T.eF = unit(spatial(fwd));
+    T.eR = spatial(right); T.eR = unit(T.eR - ksDot(T, T.eR, T.eF) * T.eF);
+    T.eU = spatial(up);    T.eU = unit(T.eU - ksDot(T, T.eU, T.eF) * T.eF - ksDot(T, T.eU, T.eR) * T.eR);
+    return T;
+}
+
 KerrInfo kerrInfo(double chi){
     const double M = 0.5;
     KerrInfo k{};

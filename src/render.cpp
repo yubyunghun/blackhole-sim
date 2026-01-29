@@ -37,7 +37,14 @@ static bool readShader(const char* name, std::string& out){
                               fs::path("shaders"), fs::path("src") / "shaders" };
     for (const auto& d : dirs) {
         std::ifstream in(d / name, std::ios::binary);
-        if (in) { std::stringstream ss; ss << in.rdbuf(); out = ss.str(); return true; }
+        if (in) {
+            std::stringstream ss; ss << in.rdbuf(); out = ss.str();
+            // Some Windows editors save UTF-8 with a byte-order mark, which GLSL
+            // compilers reject before #version. Strip it.
+            if (out.size() >= 3 && (unsigned char)out[0] == 0xEF &&
+                (unsigned char)out[1] == 0xBB && (unsigned char)out[2] == 0xBF) out.erase(0, 3);
+            return true;
+        }
     }
     std::cerr << "[Shader] could not find " << name << " (looked in shaders/ and src/shaders/)\n";
     return false;
@@ -375,36 +382,16 @@ static void setPhysicsUniforms(){
     dvec3 up = cross(right, fwd);
     auto toLocal = [](dvec3 w){ return dvec3(w.z, w.x, w.y); };   // local = world.zxy
 
-    // Kerr-Schild f and k at the camera (spin A = -a)
-    const double M = 0.5;
-    double A = -gSpin * M, a2 = A*A;
-    dvec3 x = toLocal(pos);
-    double w = dot(x,x) - a2;
-    double r = std::sqrt(0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)));
-    double f = 2.0*M*r*r*r / (r*r*r*r + a2*x.z*x.z);
-    dvec3 k((r*x.x + A*x.y)/(r*r + a2), (r*x.y - A*x.x)/(r*r + a2), x.z/r);
-    dvec4 l(1.0, k.x, k.y, k.z);                       // covariant null vector
-
-    bool ok = f < 0.98;   // static observers exist only outside the ergosphere
-    glUniform1i(glGetUniformLocation(P, "uRelCamera"), (gRelCamera && ok) ? 1 : 0);
-    if (!ok) return;
-
-    auto g = [&](const dvec4& p, const dvec4& q){        // metric inner product
-        double eta = -p.x*q.x + p.y*q.y + p.z*q.z + p.w*q.w;
-        return eta + f * dot(l, p) * dot(l, q);
-    };
-    dvec4 u(1.0 / std::sqrt(1.0 - f), 0, 0, 0);          // static observer, g(u,u) = -1
-    auto spatial = [&](dvec3 v){ dvec4 V(0.0, v.x, v.y, v.z); return V + g(u, V) * u; };
-    auto unit = [&](dvec4 v){ return v / std::sqrt(g(v, v)); };
-    dvec4 eF = unit(spatial(toLocal(fwd)));
-    dvec4 eR = spatial(toLocal(right)); eR = unit(eR - g(eR, eF) * eF);
-    dvec4 eU = spatial(toLocal(up));    eU = unit(eU - g(eU, eF) * eF - g(eU, eR) * eR);
+    // static-observer tetrad (physics.cpp), for the integration spin A = -a
+    CameraTetrad T = cameraTetrad(toLocal(pos), toLocal(fwd), toLocal(right), toLocal(up), -gSpin * 0.5);
+    glUniform1i(glGetUniformLocation(P, "uRelCamera"), (gRelCamera && T.ok) ? 1 : 0);
+    if (!T.ok) return;
 
     auto set4 = [&](const char* n, dvec4 v){
         glUniform4f(glGetUniformLocation(P, n), float(v.x), float(v.y), float(v.z), float(v.w)); };
-    set4("uCamU", u); set4("uCamEF", eF); set4("uCamER", eR); set4("uCamEU", eU);
-    glUniform1f(glGetUniformLocation(P, "uCamF"), float(f));
-    glUniform3f(glGetUniformLocation(P, "uCamK"), float(k.x), float(k.y), float(k.z));
+    set4("uCamU", T.u); set4("uCamEF", T.eF); set4("uCamER", T.eR); set4("uCamEU", T.eU);
+    glUniform1f(glGetUniformLocation(P, "uCamF"), float(T.f));
+    glUniform3f(glGetUniformLocation(P, "uCamK"), float(T.k.x), float(T.k.y), float(T.k.z));
 }
 
 // ---------- Compute dispatch ----------

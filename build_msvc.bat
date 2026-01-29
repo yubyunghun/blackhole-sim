@@ -31,4 +31,9 @@ if not exist third_party\imgui\imgui.cpp (
 del /q *.obj 2>nul
 
 cl %CLFLAGS% src\main.cpp src\physics.cpp src\render.cpp src\ui.cpp third_party\glad\src\glad.c %IMGUI% /link %LFLAGS% /out:main.exe
+if errorlevel 1 exit /b 1
+
+REM Physics self-test (no GPU needed): run bh_tests.exe
+del /q *.obj 2>nul
+cl %CLFLAGS% /Isrc tests\test_physics.cpp src\physics.cpp /link /SUBSYSTEM:CONSOLE /out:bh_tests.exe
 endlocal

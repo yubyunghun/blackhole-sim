@@ -169,6 +169,20 @@ struct KerrInfo {
 };
 double   iscoOverM(double chi);        // prograde ISCO in units of M
 KerrInfo kerrInfo(double chi);
+double   ntFlux(double rOverM, double chi);   // Novikov-Thorne flux (arbitrary units)
+
+// Static-observer tetrad at the camera, in local Kerr-Schild coordinates
+// (t, X, Y, Z) with the spin axis along Z, for integration spin A (the shader
+// integrates with A = -a). Inputs are in rs units / local coords.
+struct CameraTetrad {
+    bool  ok;               // false inside the ergosphere (no static observers)
+    double f;               // Kerr-Schild f at the camera
+    dvec3 k;                // Kerr-Schild k at the camera
+    dvec4 u, eF, eR, eU;    // time, forward, right, up (contravariant)
+};
+CameraTetrad cameraTetrad(dvec3 xLocal, dvec3 fwdLocal, dvec3 rightLocal, dvec3 upLocal, double A);
+// Inner product under the Kerr-Schild metric g = eta + f l l, l = (1, k)
+double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q);
 void     stepGravity(double realDt);   // N-body step (when gGravity is on)
 void     orbitStars();                 // put stars on circular orbits, gravity on
 

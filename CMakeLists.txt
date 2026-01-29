@@ -61,6 +61,17 @@ else()
     target_link_libraries(blackhole_sim PRIVATE glfw OpenGL::GL ${CMAKE_DL_LIBS})
 endif()
 
+# Physics self-test: CPU only, no window or GPU needed (runs in CI)
+enable_testing()
+add_executable(bh_tests tests/test_physics.cpp src/physics.cpp)
+target_include_directories(bh_tests PRIVATE src third_party/glad/include third_party/glm)
+if(MSVC)
+    target_include_directories(bh_tests PRIVATE third_party/glfw/include)
+else()
+    target_link_libraries(bh_tests PRIVATE glfw)   # only for the GLFW header path
+endif()
+add_test(NAME physics COMMAND bh_tests)
+
 # Shaders are loaded at runtime from shaders/ next to the executable
 add_custom_command(TARGET blackhole_sim POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
