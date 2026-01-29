@@ -98,6 +98,23 @@ The window can be resized freely.
 The window title shows the FPS, the effective samples per pixel, the spin,
 and whether gravity is on.
 
+## Download (Windows)
+
+Prebuilt Windows builds are on the
+[Releases page](https://github.com/yubyunghun/blackhole-sim/releases). Unzip
+and run `blackhole_sim.exe`. The C++ runtime is built in, so no installs are
+needed, but the GPU must support OpenGL 4.3.
+
+To make a release zip yourself, run this from a VS 2022 x64 Native Tools
+prompt with CMake installed:
+
+```bat
+powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -Version 1.0.0
+```
+
+This writes `dist/blackhole-sim-1.0.0-win64.zip`, containing the exe,
+`shaders/`, the README and the licenses.
+
 ## Building
 
 Requirements:
@@ -123,7 +140,9 @@ cmake --build build --config Release
 - **Linux:** uses the system GLFW (`sudo apt install libglfw3-dev`).
 
 The executable is `build/blackhole_sim` (on Windows, `build/Release/` with
-Visual Studio generators), with the shaders copied next to it. The CMake build
+Visual Studio generators), with the shaders copied next to it. On Windows
+you can add `-DBH_STATIC_RUNTIME=ON` to build the C++ runtime into the exe,
+and on Windows-on-ARM add `-A x64`, because the bundled GLFW is x64. The CMake build
 is tested with MSVC + Ninja; Linux is set up but untested. macOS isn't
 supported because it stops at OpenGL 4.1, which has no compute shaders.
 

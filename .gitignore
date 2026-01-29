@@ -15,7 +15,11 @@
 # Screenshots saved with the P key / --screenshot
 *.bmp
 
-# CMake build folders
+# CMake build folders and release packages
 build/
 build-*/
 out/
+dist/
+
+# --record output
+frames/

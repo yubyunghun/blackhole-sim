@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
-project(blackhole_sim LANGUAGES C CXX)
+project(blackhole_sim VERSION 1.0.0 LANGUAGES C CXX)
+
+# Windows release builds: link the C++ runtime statically so the .exe runs
+# without the Visual C++ redistributable (uses GLFW's glfw3_mt.lib).
+option(BH_STATIC_RUNTIME "MSVC: link the C++ runtime statically" OFF)
+if(MSVC AND BH_STATIC_RUNTIME)
+    cmake_policy(SET CMP0091 NEW)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,9 +47,12 @@ target_include_directories(blackhole_sim PRIVATE
 if(MSVC)
     # Windows: use the prebuilt GLFW that ships in third_party/
     target_include_directories(blackhole_sim PRIVATE third_party/glfw/include)
-    target_link_libraries(blackhole_sim PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party/glfw/lib-vc2022/glfw3.lib
-        opengl32 gdi32 shell32 user32)
+    if(BH_STATIC_RUNTIME)
+        set(GLFW_LIB ${CMAKE_SOURCE_DIR}/third_party/glfw/lib-vc2022/glfw3_mt.lib)
+    else()
+        set(GLFW_LIB ${CMAKE_SOURCE_DIR}/third_party/glfw/lib-vc2022/glfw3.lib)
+    endif()
+    target_link_libraries(blackhole_sim PRIVATE ${GLFW_LIB} opengl32 gdi32 shell32 user32)
     target_compile_options(blackhole_sim PRIVATE /EHsc)
 else()
     # Linux and others: use the system GLFW (e.g. apt install libglfw3-dev)
