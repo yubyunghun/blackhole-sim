@@ -100,6 +100,86 @@ int main(){
         check("a=0.9  free fall moves inward", fallRadius() < gFall.rStart ? 1.0 : 0.0, 1.0, 0.0);
         gFall = FreeFall{}; gCam = saved; gSpin = savedSpin;
     }
+    {   // a star on a circular Kerr orbit keeps its radius and returns after
+        // one period T = 2 pi / Omega (coordinate time)
+        double savedSpin = gSpin;
+        gSpin = 0.9;
+        const double r = 10.0;                                   // rs
+        double v = circularOrbitSpeed(r, gSpin);                 // units of c
+        ObjectData star{ vec4(float(r * SAG_RS), 0, 0, 1e9f), vec4(1), 1e30f,
+                         vec3(0.0f, 0.0f, float(-v * C_LIGHT)), false };
+        bool ok = initStarGeodesic(star);
+        check("a=0.9  circular star orbit initialises", ok ? 1.0 : 0.0, 1.0, 0.0);
+        double T = 2.0 * M_PI * r / v;
+        double rMin = 1e9, rMax = 0.0;
+        for (int i = 0; i < 100; ++i) {
+            advanceStar(star, T / 100.0);
+            double rr = length(dvec3(vec3(star.posRadius))) / SAG_RS;
+            rMin = std::min(rMin, rr); rMax = std::max(rMax, rr);
+        }
+        check("a=0.9  circular orbit radius drift (fraction)", (rMax - rMin) / r, 0.0, 1e-3);
+        double back = length(dvec3(vec3(star.posRadius)) / SAG_RS - dvec3(r, 0, 0));
+        check("a=0.9  back at the start after one period (rs)", back, 0.0, 0.01 * r);
+        gSpin = savedSpin;
+    }
+    {   // perihelion precession (a = 0): an eccentric orbit launched at apoapsis
+        // (40 rs). Simulated: angle between successive apoapses minus 2 pi.
+        // Exact: dphi = 2 * int_{rp}^{ra} L / (r^2 sqrt(R(r))) dr - 2 pi with
+        // R(r) = E^2 - (1 - 2M/r)(1 + L^2/r^2), E and L the orbit's constants.
+        double savedSpin = gSpin;
+        gSpin = 0.0;
+        const double ra = 40.0;
+        double v = 0.85 * circularOrbitSpeed(ra, 0.0);
+        ObjectData star{ vec4(float(ra * SAG_RS), 0, 0, 1e9f), vec4(1), 1e30f,
+                         vec3(0.0f, 0.0f, float(-v * C_LIGHT)), false };
+        initStarGeodesic(star);
+        const double E = star.geoE;
+        const double L = std::fabs(star.geoX.x * star.geoP.y - star.geoX.y * star.geoP.x);
+
+        // simulate to the next apoapsis, accumulating the angle travelled
+        double dt = 2.0 * M_PI * ra / v / 4000.0, phi = 0.0, prevAng = 0.0;
+        double r1 = ra, r2 = ra, phiApo = 0.0;
+        bool wentIn = false;
+        for (int i = 0; i < 20000 && phiApo == 0.0; ++i) {
+            advanceStar(star, dt);
+            dvec3 w = dvec3(vec3(star.posRadius)) / SAG_RS;
+            double rr = length(w), ang = std::atan2(w.z, w.x);
+            double d = ang - prevAng;
+            if (d >  M_PI) d -= 2.0 * M_PI;
+            if (d < -M_PI) d += 2.0 * M_PI;
+            phi += d; prevAng = ang;
+            if (rr < 0.9 * ra) wentIn = true;
+            if (wentIn && r1 > r2 && r1 > rr) phiApo = std::fabs(phi);   // r peaked: apoapsis
+            r2 = r1; r1 = rr;
+        }
+
+        // exact value. r^3 R(r) = (1 - E^2)(ra - r)(r - rp)(r - r3): find the
+        // turning points ra, rp from E and L, r3 from Vieta (product of roots
+        // = 2 M L^2 / (1 - E^2)). With r = (ra+rp)/2 + (ra-rp)/2 cos(chi) the
+        // factor sqrt((ra-r)(r-rp)) cancels against dr, leaving a smooth integrand.
+        const double M = 0.5;
+        auto R = [&](double r){ return E*E - (1.0 - 2.0*M/r) * (1.0 + L*L/(r*r)); };
+        auto root = [&](double lo, double hi){            // R(lo), R(hi) of opposite sign
+            bool loPos = R(lo) > 0.0;
+            for (int i = 0; i < 200; ++i) { double mid = 0.5*(lo+hi); ((R(mid) > 0.0) == loPos ? lo : hi) = mid; }
+            return 0.5*(lo+hi);
+        };
+        // brackets: R > 0 at 0.75 ra (between the turning points for this orbit),
+        // R < 0 at 2 ra and at the photon sphere 3M
+        double raX = root(0.75 * ra, 2.0 * ra);           // outer turning point (~40)
+        double rp  = root(3.0 * M, 0.75 * ra);            // inner turning point
+        double r3  = 2.0*M*L*L / ((1.0 - E*E) * raX * rp);
+        double sum = 0.0;
+        const int N = 20000;
+        for (int i = 0; i < N; ++i) {
+            double chi = M_PI * (i + 0.5) / N;
+            double r = 0.5*(raX + rp) + 0.5*(raX - rp)*std::cos(chi);
+            sum += L / (r*r * std::sqrt((1.0 - E*E) * (r - r3) / (r*r*r))) * (M_PI / N);
+        }
+        double exact = 2.0 * sum - 2.0 * M_PI;
+        check("a=0    perihelion precession vs exact GR (rad)", phiApo - 2.0 * M_PI, exact, 0.01 * exact);
+        gSpin = savedSpin;
+    }
     {   // a = 0: Kerr-Schild f reduces to Schwarzschild rs/r
         dvec3 x(5.0, 2.0, -3.0);
         CameraTetrad T = cameraTetrad(x, dvec3(1,0,0), dvec3(0,1,0), dvec3(0,0,1), 0.0);

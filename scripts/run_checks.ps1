@@ -58,7 +58,9 @@ public static class ImgCmp {
 }
 "@
 
-function Render([string]$name, [string[]]$extra, [string]$size = "640x360", [int]$frames = 40) {
+# 80 frames: the progressive average converges after ~40 passes, so this
+# leaves margin if the window is resized (and the average restarts) early on
+function Render([string]$name, [string[]]$extra, [string]$size = "640x360", [int]$frames = 80) {
     $out = Join-Path $tmp "$name.bmp"
     Remove-Item $out -ErrorAction SilentlyContinue
     & $Exe --size $size --no-ui --screenshot $out $frames @extra | Out-Null

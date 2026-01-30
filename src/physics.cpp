@@ -205,58 +205,82 @@ void stepFall(double realDt){
     }
 }
 
-// ---------- N-body gravity ----------
-// Two-pass (compute all accelerations, then integrate) so the result doesn't
-// depend on object order, with a real time step so speed doesn't depend on
-// frame rate. Semi-implicit Euler with substeps for stability near the hole.
+// ---------- Star motion: Kerr geodesics ----------
+// Stars are test particles moving on timelike geodesics of the hole's
+// spacetime (same Hamiltonian and integrator as the falling camera). Their
+// pull on each other is ignored: each is ~1e-6 of the hole's mass. Compared
+// with Newtonian gravity this gives perihelion precession (~3*pi*rs/r per
+// orbit), the ISCO, plunging orbits and frame dragging.
+static dvec3 worldToLocal(dvec3 w){ return dvec3(w.z, w.x, w.y); }
+static dvec3 localToWorld(dvec3 l){ return dvec3(l.y, l.z, l.x); }
+
+// From posRadius (m) and velocity (m/s, coordinate velocity dx/dt):
+// u = u^t (1, v/c), normalised so g(u,u) = -1, then lowered: p_mu = g_mu_nu u^nu.
+bool initStarGeodesic(ObjectData& o){
+    const double A = spinA();
+    dvec3 x = worldToLocal(dvec3(vec3(o.posRadius))) / SAG_RS;
+    dvec3 v = worldToLocal(dvec3(o.velocity)) / C_LIGHT;
+    KS s = ksAt(x, A);
+    double lV = 1.0 + dot(s.k, v);                         // l_mu V^mu with V = (1, v)
+    double gVV = -1.0 + dot(v, v) + s.f * lV * lV;         // g(V, V)
+    if (gVV >= -1e-9) return false;                        // not timelike (inside the ergoregion at rest, or v >= c)
+    double ut = 1.0 / std::sqrt(-gVV);
+    double lu = ut * lV;
+    o.geoE = ut - s.f * lu;                                // E = -p_t = u^t - f (l.u)
+    o.geoP = ut * v + s.f * s.k * lu;                      // p_i = u^i + f k_i (l.u)
+    o.geoX = x;
+    o.geoInit = true;
+    return true;
+}
+
+// Advance by coordinate time dtCoord (rs/c), stepping in proper time with
+// dt/dtau = E + f S, small steps near the hole.
+void advanceStar(ObjectData& o, double dtCoord){
+    const double A = spinA();
+    double done = 0.0;
+    int guard = 0;
+    while (done < dtCoord && guard++ < 100000) {
+        KS s = ksAt(o.geoX, A);
+        double S = o.geoE + dot(s.k, o.geoP);
+        double dtdtau = std::max(o.geoE + s.f * S, 1e-9);
+        double h = 0.01 * std::max(s.r, 0.05);              // proper-time step
+        h = std::min(h, (dtCoord - done) / dtdtau);
+        geodesicRK4(o.geoX, o.geoP, o.geoE, A, h);
+        done += h * dtdtau;
+    }
+    // world position (m) and coordinate velocity (m/s) for the renderer / UI
+    KS s = ksAt(o.geoX, A);
+    double S = o.geoE + dot(s.k, o.geoP);
+    dvec3 dxdtau = o.geoP - s.f * S * s.k;
+    dvec3 v = dxdtau / std::max(o.geoE + s.f * S, 1e-9);
+    o.posRadius = vec4(vec3(localToWorld(o.geoX) * SAG_RS), o.posRadius.w);
+    o.velocity  = vec3(localToWorld(v) * C_LIGHT);
+}
+
 void stepGravity(double realDt){
     if(!gGravity) return;
-    realDt = std::min(realDt, 0.05);              // avoid huge jumps after a stall
-    const int SUB = 50;
-    const double h = realDt * gTimeScale / SUB;   // simulated seconds per substep
-
-    vector<ObjectData> holes;
-    for(const auto& b : gObjs) if(b.pinned) holes.push_back(b);
-    // anything whose centre falls inside a pinned body's event horizon is swallowed.
-    // Checked every substep: otherwise a star can fall through the centre between
-    // checks and get flung out by the (Newtonian) 1/r^2 singularity.
-    auto swallow = [&](){
-        gObjs.erase(std::remove_if(gObjs.begin(), gObjs.end(), [&](const ObjectData& o){
-            if(o.pinned) return false;
-            for(const auto& b : holes){
-                double rs = 2.0 * G_GRAV * double(b.mass) / (C_LIGHT*C_LIGHT);
-                if(length(vec3(o.posRadius) - vec3(b.posRadius)) < rs) return true;
-            }
-            return false;
-        }), gObjs.end());
-    };
-
-    vector<dvec3> acc;
-    for(int s=0; s<SUB; ++s){
-        const size_t n = gObjs.size();
-        acc.assign(n, dvec3(0.0));
-        for(size_t i=0;i<n;++i){
-            acc[i] = dvec3(0.0);
-            if(gObjs[i].pinned) continue;
-            dvec3 pi = dvec3(vec3(gObjs[i].posRadius));
-            for(size_t j=0;j<n;++j){
-                if(i==j) continue;
-                dvec3 d = dvec3(vec3(gObjs[j].posRadius)) - pi;
-                double dist = length(d);
-                if(dist <= 0.0) continue;
-                acc[i] += d * (G_GRAV * double(gObjs[j].mass) / (dist*dist*dist));
-            }
-        }
-        for(size_t i=0;i<n;++i){
-            auto& o = gObjs[i];
-            if(o.pinned) continue;
-            dvec3 v = dvec3(o.velocity) + acc[i]*h;
-            dvec3 p = dvec3(vec3(o.posRadius)) + v*h;
-            o.velocity = vec3(v);
-            o.posRadius = vec4(vec3(p), o.posRadius.w);
-        }
-        swallow();
+    realDt = std::min(realDt, 0.05);                       // avoid huge jumps after a stall
+    double dtCoord = realDt * gTimeScale * C_LIGHT / SAG_RS; // simulated seconds -> rs/c
+    double rPlus = kerrInfo(gSpin).rPlus;
+    for (auto& o : gObjs) {
+        if (o.pinned) continue;
+        if (!o.geoInit && !initStarGeodesic(o)) continue;
+        advanceStar(o, dtCoord);
     }
+    // stars whose centre crosses the event horizon are swallowed
+    gObjs.erase(std::remove_if(gObjs.begin(), gObjs.end(), [&](const ObjectData& o){
+        return !o.pinned && o.geoInit && ksAt(o.geoX, spinA()).r <= rPlus;
+    }), gObjs.end());
+}
+
+// Circular equatorial orbit (prograde) at Kerr-Schild cylindrical radius R:
+// the Boyer-Lindquist radius is r = sqrt(R^2 - a^2), the coordinate angular
+// velocity Omega = sqrt(M) / (r^1.5 + a sqrt(M)), and in Kerr-Schild
+// coordinates the motion is a rigid rotation, so the speed is Omega * R (c).
+double circularOrbitSpeed(double R, double chi){
+    const double M = 0.5, a = chi * M;
+    double r = std::sqrt(std::max(R*R - a*a, 1e-12));
+    return std::sqrt(M) / (r * std::sqrt(r) + a * std::sqrt(M)) * R;
 }
 
 // Give every star the velocity of a circular orbit around the black hole
@@ -267,10 +291,11 @@ void orbitStars(){
         vec3 r = vec3(o.posRadius);
         double d = length(r);
         if (d <= 0.0) continue;
-        double v = std::sqrt(G_GRAV * SAG_MASS / d);
+        double v = circularOrbitSpeed(d / SAG_RS, gSpin) * C_LIGHT;
         vec3 dir = normalize(cross(vec3(0,1,0), r));
         if (!std::isfinite(dir.x)) dir = vec3(1,0,0);   // star on the spin axis
         o.velocity = dir * float(v);
+        o.geoInit = false;                               // re-derive the geodesic state
     }
     gGravity = true;
 }

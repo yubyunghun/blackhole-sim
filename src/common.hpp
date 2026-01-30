@@ -140,6 +140,11 @@ struct ObjectData {
     float mass;     // kg (packed later into vec4[4] for std140)
     vec3  velocity; // m/s
     bool  pinned;   // never moves (the black hole: the ray tracer assumes it sits at the origin)
+    // Relativistic motion state (set up from posRadius/velocity when gravity
+    // starts): local Kerr-Schild position and covariant momentum, rs units.
+    bool   geoInit = false;
+    dvec3  geoX{0.0}, geoP{0.0};
+    double geoE = 1.0;
 };
 inline vector<ObjectData> gObjs = {
     { vec4(4e11f, 0.0f, 0.0f, 4e10f), vec4(1,1,0,1), 1.98892e30f, vec3(0), false },
@@ -209,8 +214,12 @@ dvec4 fallVelocity();                // camera 4-velocity u^mu (t, X, Y, Z)
 double fallRadius();                 // current Boyer-Lindquist r of the camera (rs)
 // Inner product under the Kerr-Schild metric g = eta + f l l, l = (1, k)
 double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q);
-void     stepGravity(double realDt);   // N-body step (when gGravity is on)
+void     stepGravity(double realDt);   // move the stars along Kerr geodesics (when gGravity is on)
 void     orbitStars();                 // put stars on circular orbits, gravity on
+// Star geodesics (also used by the self-test). Times in rs/c.
+bool     initStarGeodesic(ObjectData& o);          // from posRadius/velocity
+void     advanceStar(ObjectData& o, double dtCoord);  // advance by coordinate time
+double   circularOrbitSpeed(double r_rs, double chi);  // coordinate speed (units of c)
 
 // ---------- render.cpp ----------
 void  initRenderer();                  // programs, buffers, render targets

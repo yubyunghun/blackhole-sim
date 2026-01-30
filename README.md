@@ -51,8 +51,11 @@ relativistic effects.
 - **Ray-traced spacetime grid.** The black hole's embedding diagram (Flamm's
   paraboloid) is drawn as a grid that light rays actually hit, so it is
   lensed, wraps around the shadow, and is hidden behind the hole.
-- **N-body gravity.** Stars fall toward the hole and are swallowed at the
-  event horizon, or can be put on circular orbits.
+- **Relativistic star orbits.** With gravity on, the stars follow Kerr
+  geodesics (the same integrator as the falling camera). Their orbits precess,
+  plunge inside the ISCO, feel frame dragging, and stars are swallowed at the
+  event horizon. **Orbit stars** gives them exact circular Kerr orbits. The
+  precession matches exact GR to under 1% (see [Testing](#testing)).
 - **Resizable window and fullscreen** (`F11`). The ray-traced resolution
   follows the window. **Auto resolution** caps it at about 0.5 megapixels so
   large and fullscreen windows stay smooth, and a render-scale slider trades
@@ -209,7 +212,7 @@ efficiencies below and exits.
 
 The project has two layers of checks:
 
-- **Physics self-test** (`bh_tests`, no GPU needed). It runs 29 checks of the
+- **Physics self-test** (`bh_tests`, no GPU needed). It runs 33 checks of the
   CPU-side physics against published values and exact identities:
   - Kerr horizon, photon orbits, ISCO and efficiency for several spins
   - Novikov–Thorne flux: zero at the ISCO, ~r⁻³ far out, peak at 9.55M
@@ -217,6 +220,9 @@ The project has two layers of checks:
     are null
   - the analytic shadow size, the gravitational blueshift a hovering camera
     sees, and that a free-falling camera stays on its mass shell
+  - star orbits: a circular Kerr orbit keeps its radius (drift ~1e-7) and
+    returns after one period, and an eccentric orbit precesses by the exact
+    general-relativistic amount (0.365 vs 0.362 rad)
 
   It's built by both build systems. Run `ctest` (CMake) or `bh_tests.exe`.
   **GitHub Actions** builds on Windows and Linux and runs it on every push.
