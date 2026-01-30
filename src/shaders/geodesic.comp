@@ -64,10 +64,13 @@ layout(std140, binding=3) uniform Objects {
 //  - units of rs (rs = 2M = 1, so M = 0.5) to keep r^4 etc. in float range
 //  - "local" coords have the spin axis along +Z; world has it along +y:
 //        local = world.zxy,   world = local.yzx   (cyclic, so right-handed)
-//  - We trace from the camera backwards in time. Kerr with spin +a run
-//    backwards in time is Kerr with spin -a run forwards, so we integrate
-//    with A = -a. (This also keeps ingoing Kerr-Schild regular at the
-//    horizon for the rays we trace.)
+//  - We trace from the camera backwards in time: the photon arriving at the
+//    camera is integrated with negative steps, in ingoing Kerr-Schild
+//    coordinates for the hole's real spin (A = +a). These coordinates are
+//    regular across the event horizon, so the camera can be inside it
+//    (falling in). Rays from an outside camera that run backwards onto the
+//    horizon are the shadow; rays from an inside camera run back out
+//    through the horizon to the disk and the sky.
 // ---------------------------------------------------------------------------
 
 const float STEP_FRAC = 0.02;   // step = 2% of current radius near the hole...
@@ -80,7 +83,13 @@ const int   MAX_STEPS = 3000;   // rays still bound after this are captured
 const float MASS      = 0.5;    // M in units of rs
 
 float RS;      // Schwarzschild radius in metres (from Disk UBO)
-float A;       // spin parameter used for integration (= -a, see above)
+float A;       // spin parameter a (rs units)
+float E_CAM;   // photon energy measured by the camera (for the redshift)
+// Sign of the photon's Killing energy E = -p_t. Momenta are scaled so |E| = 1.
+// Outside the ergoregion E > 0 always; inside the horizon d/dt is spacelike and
+// a perfectly normal (future-directed) photon can have E < 0, so the sign has
+// to be carried rather than assumed.
+float E_SIGN = 1.0;
 
 // Boyer-Lindquist r at a Kerr-Schild point
 float ksR(vec3 x){
@@ -108,7 +117,7 @@ void kerrRHS(vec3 x, vec3 p, out vec3 dx, out vec3 dp){
     float Q  = r2*r2 + a2*x.z*x.z;
     float f  = 2.0*MASS*r2*r / Q;
     vec3  k  = vec3((r*x.x + A*x.y)/P, (r*x.y - A*x.x)/P, x.z/r);
-    float S  = 1.0 + dot(k, p);
+    float S  = E_SIGN + dot(k, p);
 
     dx = p - f*S*k;
 
@@ -146,12 +155,12 @@ void rk4(inout vec3 x, inout vec3 p, float h){
 // ---------------------------------------------------------------------------
 // Relativistic camera. A real camera measures directions in its own local
 // orthonormal frame, not in coordinates. The CPU builds the frame (tetrad) of
-// a static observer at the camera (u = time direction, e_f/e_r/e_u =
-// forward/right/up, orthonormal under the Kerr-Schild metric). A pixel with
-// direction n in that frame is the photon  p^mu = u + n_r e_r + n_u e_u + n_f e_f.
-// Lowered with g = eta + f l l (l = (1, k)) and scaled to p_t = -1.
-// This adds the correct aberration near the hole, and matches the static
-// observer already used for the camera's redshift.
+// the camera: a static observer, or the falling camera during a dive
+// (u = its 4-velocity, e_f/e_r/e_u = forward/right/up, orthonormal under the
+// Kerr-Schild metric). Light seen in direction n travels *towards* the
+// camera, so the arriving photon is  p^mu = u - (n_r e_r + n_u e_u + n_f e_f).
+// Lowered with g = eta + f l l (l = (1, k)) and scaled to p_t = -1. Its
+// energy measured by the camera, -p.u, is then 1/(-p_t) (before scaling).
 // ---------------------------------------------------------------------------
 uniform int   uRelCamera;            // 1 = tetrad camera, 0 = coordinate directions
 uniform vec4  uCamU, uCamEF, uCamER, uCamEU;   // (t, X, Y, Z), local Kerr-Schild
@@ -159,11 +168,15 @@ uniform float uCamF;                 // f at the camera
 uniform vec3  uCamK;                 // k at the camera
 
 vec3 initMomentumTetrad(vec3 n){     // n = (right, up, forward), unit
-    vec4 P  = uCamU + n.x*uCamER + n.y*uCamEU + n.z*uCamEF;   // contravariant
+    vec4 P  = uCamU - (n.x*uCamER + n.y*uCamEU + n.z*uCamEF); // contravariant, arriving
     float lp = P.x + dot(uCamK, P.yzw);                       // l_mu p^mu
     float pt = -P.x + uCamF * lp;                             // p_t
     vec3  ps = P.yzw + uCamF * uCamK * lp;                    // p_i
-    return ps / (-pt);                                        // energy 1
+    // scale to |E| = 1, keeping the momentum future-directed (never flip it)
+    float s = 1.0 / max(abs(pt), 1e-6);
+    E_SIGN = (pt <= 0.0) ? 1.0 : -1.0;                        // E = -p_t
+    E_CAM = s;                                                // -p.u = 1 before scaling
+    return ps * s;
 }
 
 vec3 initMomentum(vec3 x, vec3 d){
@@ -289,23 +302,23 @@ float gasDensity(float r, float phi, float t){
     return smoothstep(0.30, 0.75, n);
 }
 
-// Redshift for gas on a prograde circular (Keplerian) Kerr orbit, seen by a
-// static camera:   g = 1 / ( u^t_cam * u^t (1 - Omega * L) )
+// Redshift for gas on a prograde circular (Keplerian) Kerr orbit:
+//   g = E_cam / ( u^t (1 - Omega * L) )
 //   Omega = sqrt(M) / (r^1.5 + a sqrt(M))
 //   u^t   = (r^1.5 + a sqrt(M)) / ( r^0.75 sqrt(r^1.5 - 3M sqrt(r) + 2a sqrt(M)) )
 //   L     = photon's angular momentum about the spin axis (energy = 1)
-//   u^t_cam = 1/sqrt(1 - f_cam)   (static observer in Kerr-Schild: g_tt = -1 + f)
-// This one number contains Doppler beaming, frame dragging and gravitational
-// redshift. For a = 0 it reduces to the special-relativistic Doppler factor
-// times sqrt(1 - rs/r) used before.
-float kerrDiskG(float r, float aPhys, float Lphoton, float fCam){
+//   E_cam = photon energy measured by the camera (static: 1/sqrt(1 - f_cam);
+//           falling camera: from its own 4-velocity)
+// This one number contains Doppler beaming, frame dragging, gravitational
+// redshift and the camera's own motion.
+float kerrDiskG(float r, float aPhys, float Lphoton, float eCam){
     float sM  = sqrt(MASS);
     float r15 = r * sqrt(r);
     float Om  = sM / (r15 + aPhys*sM);
     float ut  = (r15 + aPhys*sM) /
                 (pow(r, 0.75) * sqrt(max(r15 - 3.0*MASS*sqrt(r) + 2.0*aPhys*sM, 1e-4)));
-    float uCam = 1.0 / sqrt(max(1.0 - fCam, 1e-4));
-    return 1.0 / (uCam * ut * max(1.0 - Om*Lphoton, 1e-3));
+    // emitted frequency -p.u_em = u^t (E - Omega L), with E = +-1
+    return eCam / (ut * max(E_SIGN - Om*Lphoton, 1e-3));
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +422,7 @@ void main(){
     float r1 = disk.x / RS, r2 = disk.y / RS;   // Boyer-Lindquist radii (rs units)
     float aPhys = kerr.x;
     float rPlus = kerr.y;
-    A = -aPhys;                                 // backwards in time == opposite spin
+    A = aPhys;
 
     // per-pixel random rotation of the shared jitter sequence, so neighbouring
     // pixels don't all sample the same sub-pixel spot (avoids visible patterns)
@@ -422,16 +435,22 @@ void main(){
     vec3 x  = CAM.camPos.xyz / RS;  // world position, rs units (used for hit tests)
     vec3 v  = dir;                  // world direction of travel
     vec3 xl = x.zxy;                // local Kerr-Schild position (spin axis = Z)
-    float fCam = ksF(xl);
-    if (fCam >= 0.999) {            // camera inside the horizon: nothing to see
-        writeSample(pix, vec4(0,0,0,1), WIDTH, HEIGHT);
-        return;
+    vec3 pl;
+    if (uRelCamera == 1) {
+        pl = initMomentumTetrad(normalize(vec3(u, -v_, 1.0)));
+    } else {
+        // coordinate camera (static): the arriving photon moves along -dir
+        float fCam = ksF(xl);
+        if (fCam >= 0.999) { writeSample(pix, vec4(0,0,0,1), WIDTH, HEIGHT); return; }
+        pl = initMomentum(xl, -dir.zxy);
+        E_CAM = 1.0 / sqrt(1.0 - fCam);
     }
-    vec3 pl = (uRelCamera == 1) ? initMomentumTetrad(normalize(vec3(u, -v_, 1.0)))
-                                : initMomentum(xl, dir.zxy);
-    // photon angular momentum about the spin axis (conserved). The traced ray
-    // runs backwards in time, so the physical photon's is the negative.
-    float Lphys = -(xl.x*pl.y - xl.y*pl.x);
+    // photon angular momentum about the spin axis (conserved; energy = 1)
+    float Lphys = xl.x*pl.y - xl.y*pl.x;
+    // A ray that has been outside the horizon and runs back onto it is part of
+    // the shadow. A ray from a camera inside the horizon first has to get out.
+    bool beenOutside = ksR(xl) > rPlus * 1.02;
+    float rPrev = ksR(xl);
 
     vec4 color = vec4(0);           // what the ray finally hits (premultiplied)
     vec4 front = vec4(0);           // grid lines crossed on the way (front-to-back)
@@ -448,12 +467,34 @@ void main(){
     for (int i = 0; i < MAX_STEPS && !done; ++i){
         float R = length(x);
         float h = mix(STEP_FRAC, STEP_FAR, smoothstep(6.0, 30.0, R)) * R;
+        // Near the horizon, rays running backwards onto it have a momentum that
+        // grows like 1/(r - r+): shrink the step with the distance to the
+        // horizon so the integration stays stable until it is reached. The
+        // floor lets rays that genuinely cross (from a camera inside) get through.
+        h = min(h, max(0.3 * abs(ksR(xl) - rPlus), 1e-3));
         vec3 p0 = x;
-        rk4(xl, pl, h);
+        rk4(xl, pl, -h);                  // backwards in time
         x = xl.yzx;                       // back to world coords
         vec3 p1 = x;
         float segLen = length(p1 - p0);
         if (segLen > 0.0) v = (p1 - p0) / segLen;
+        float rNow = ksR(xl);
+        if (rNow > rPlus * 1.02) beenOutside = true;
+        // Below the photon orbit an inward-moving ray can't come back out, so a
+        // ray from outside that is this close to the horizon and still heading
+        // in is certainly in the shadow. Stopping here avoids the zone where its
+        // momentum blows up in these coordinates.
+        bool fallingIn = beenOutside && rNow < rPlus * 1.02 && rNow < rPrev;
+        // From a camera inside the horizon, rays that run backwards up against
+        // the horizon from the inside come from the past horizon ("white hole")
+        // of the eternal solution, which in a real collapse is the collapsing
+        // star: dark. They are the outgoing family, for which S = -l.p = 1 + k.p
+        // grows without bound near the horizon; rays that genuinely cross out
+        // (the ingoing family) keep S of order 1. Catch them early, before
+        // float precision runs out.
+        if (!beenOutside && rNow < rPlus * 1.1 && abs(E_SIGN + dot(ksK(xl, rNow), pl)) > 20.0)
+            fallingIn = true;
+        rPrev = rNow;
 
         // --- earliest event along this step ---
         float bestT = 2.0;
@@ -514,7 +555,7 @@ void main(){
                                  : mix(vec3(1.00, 0.47, 0.19), vec3(1.00, 0.59, 0.25), s * 2.0 - 1.0);
                 color = vec4(c, 1.0);
             } else if (realDisk) {
-                float g = kerrDiskG(rBL, aPhys, Lphys, fCam);
+                float g = kerrDiskG(rBL, aPhys, Lphys, E_CAM);
                 color = diskColorRelativistic(pc, rBL, g, r1, r2, disk.w);
             } else {
                 float ro = rBL / r2;
@@ -531,9 +572,11 @@ void main(){
             color = vec4(oc.rgb * (amb + (1.0-amb)*diff), oc.a);
             if (videoLook) color = vec4(mix(oc.rgb, vec3(1.0), 0.1), 1.0);  // flat, like the video
             done = true;
-        } else if (ksR(xl) <= rPlus) {
-            // crossed the event horizon. (In the video the shadow is a solid
-            // dark warm grey, sampled at (72,52,51), hiding the grid.)
+        } else if (fallingIn || rNow < 0.02 || any(isnan(pl)) || dot(pl, pl) > 1e10) {
+            // Shadow: traced backwards onto the event horizon (where the
+            // momentum of such rays blows up in these coordinates), or into the
+            // singularity. (In the video the shadow is a solid dark warm grey,
+            // sampled at (72,52,51), hiding the grid.)
             color = videoLook ? vec4(0.28, 0.20, 0.20, 1.0) : vec4(0,0,0,1);
             done = true;
         } else if (length(x) > ESCAPE_R && dot(x, v) > 0.0) {
@@ -549,5 +592,7 @@ void main(){
 
     // grid lines in front, everything else behind (premultiplied "over")
     color = front + (1.0 - front.a) * color;
+    // keep within half-float range (a diving camera sees huge blueshifts)
+    color = clamp(color, vec4(0.0), vec4(6.0e4));
     writeSample(pix, color, WIDTH, HEIGHT);
 }

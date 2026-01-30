@@ -7,6 +7,8 @@ the physics rather than being painted on.
 
 ![Orbiting a spinning black hole: lensed accretion disk, starfield and spacetime grid](docs/demo.gif)
 
+![Diving into the black hole: the camera falls freely, crosses the event horizon and keeps rendering inside](docs/dive.gif)
+
 Based on [kavan010/black_hole](https://github.com/kavan010/black_hole) and
 [its video](https://youtu.be/8-B6ryuBkCM), with a faster integrator and extra
 relativistic effects.
@@ -34,6 +36,11 @@ relativistic effects.
 - **Relativistic camera.** Pixel directions are measured in a static
   observer's local frame, so aberration near the hole is correct. The shadow
   size matches the analytic formula (see [Physics](#physics)).
+- **Dive into the black hole** (`F`). The camera is let go and follows a
+  free-fall geodesic. It crosses the event horizon and keeps rendering from
+  inside, with the light blueshifted by its own motion, until it reaches the
+  singularity (spin 0) or the inner horizon (spinning hole). Exposure adapts
+  automatically during a dive.
 - **Animated gas.** A procedural texture with differential rotation: inner
   rings orbit faster than outer ones.
 - **HDR bloom and ACES tone mapping.**
@@ -92,6 +99,7 @@ The window can be resized freely.
 | `H` | Show/hide the control panel |
 | `V` | Video look on/off (match the original video) |
 | `F11` | Fullscreen on/off |
+| `F` | Dive into the black hole / stop the dive |
 | `F5` | Reload the shaders from disk (edit GLSL without restarting) |
 | `Esc` | Quit |
 
@@ -164,7 +172,8 @@ included in `third_party/`.
 main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
          [--no-ui] [--video-look] [--size WxH] [--fullscreen] [--coord-camera]
-         [--time seconds] [--record folder [frames]]
+         [--time seconds] [--record folder [frames]] [--camera distance_rs elevation_deg]
+         [--dive] [--dive-to r_rs]
 main.exe --physics
 ```
 
@@ -181,7 +190,18 @@ That's how [`docs/demo.gif`](docs/demo.gif) was made:
 
 ```bat
 main.exe --record frames 72
-``` `--coord-camera` turns off
+```
+
+With `--dive`, the recorder follows the fall instead, one frame per 3%
+closer to the hole. That's [`docs/dive.gif`](docs/dive.gif):
+
+```bat
+main.exe --camera 10 25 --dive --record frames
+```
+
+`--camera` sets the starting distance (in rs) and the elevation above the
+disk (in degrees). `--dive-to 0.6` falls to r = 0.6 rs and holds there, which
+is useful for screenshots inside the horizon. `--coord-camera` turns off
 the relativistic camera. `--physics` prints the table of Kerr radii and
 efficiencies below and exits.
 
@@ -189,13 +209,14 @@ efficiencies below and exits.
 
 The project has two layers of checks:
 
-- **Physics self-test** (`bh_tests`, no GPU needed). It runs 26 checks of the
+- **Physics self-test** (`bh_tests`, no GPU needed). It runs 29 checks of the
   CPU-side physics against published values and exact identities:
   - Kerr horizon, photon orbits, ISCO and efficiency for several spins
   - Novikov–Thorne flux: zero at the ISCO, ~r⁻³ far out, peak at 9.55M
   - the camera tetrad is orthonormal under the Kerr metric, and pixel photons
     are null
-  - the analytic shadow size
+  - the analytic shadow size, the gravitational blueshift a hovering camera
+    sees, and that a free-falling camera stays on its mass shell
 
   It's built by both build systems. Run `ctest` (CMake) or `bh_tests.exe`.
   **GitHub Actions** builds on Windows and Linux and runs it on every push.
@@ -250,9 +271,23 @@ around the shadow. At spin 0.9 it reaches 1.16 rs.
 
 ![Spin 0 vs spin 0.9](docs/spin.png)
 
-**Relativistic camera.** The camera is a static observer. Its local frame
-(tetrad) is built by Gram–Schmidt under the Kerr–Schild metric. A pixel with
-direction `n` in that frame is the photon `p = u + nᵣ eᵣ + nᵤ eᵤ + n_f e_f`.
+**Relativistic camera.** The camera is a static observer, or during a dive a
+freely falling one. Its local frame (tetrad) is built by Gram–Schmidt under
+the Kerr–Schild metric. A pixel looking in direction `n` in that frame
+receives the photon `p = u − (nᵣ eᵣ + nᵤ eᵤ + n_f e_f)`, which is then traced
+backwards in time. The photon's energy measured by the camera, `−p·u`, sets
+the camera's part of the redshift.
+
+**Inside the horizon.** The tracer works in *ingoing* Kerr–Schild
+coordinates, which are smooth across the event horizon, so the camera can be
+inside it. Two points matter there:
+- `∂ₜ` becomes spacelike inside the horizon, so a photon's Killing energy
+  `E = −p_t` can be negative. The tracer keeps its sign (`|E| = 1`) rather
+  than assuming E > 0.
+- From inside, rays that run backwards up against the horizon without
+  crossing it come from the past horizon ("white hole") of the eternal
+  solution. In a real collapse that is the collapsing star, so they are
+  rendered dark. They are recognised by `S = E + k·p` blowing up.
 
 *Check:* for spin 0 at the default distance (11.81 rs), a static observer
 should see a shadow of angular radius
@@ -292,8 +327,12 @@ compile, the error is printed and the old shaders keep running.
    `H = ½(−1 + |p|² − f·(1 + k·p)²)`. Hamilton's equations, with analytic
    gradients of `f` and `k`, are stepped with RK4 in units of `rs`. The step
    is 2% of the radius near the hole, growing to 8% far away.
-   - Rays are traced backwards in time, which for Kerr is the same as
-     tracing forwards around a hole with the opposite spin.
+   - Rays are traced backwards in time (negative steps), from the photon
+     arriving at the camera, in ingoing coordinates, so the camera can also
+     be inside the horizon.
+   - Near the horizon the step shrinks with the distance to it, and a ray
+     from outside that is within 2% of the horizon and still heading in is
+     counted as shadow (below the photon orbit it can't come back out).
    - With spin 0 this reduces exactly to Schwarzschild.
 3. **Hits.** Each step is tested against the disk plane (interpolated to the
    exact crossing point), the stars (segment–sphere test), and the event
@@ -302,8 +341,11 @@ compile, the error is printed and the old shaders keep running.
    Grid lines are blended in front to back and the ray keeps going, so
    whatever lies behind still shows through the gaps.
 4. **Disk shading.** For gas on circular Kerr orbits, the redshift is
-   `g = 1 / (u_cam · uᵗ · (1 − Ω·L))`. This single factor includes Doppler
-   beaming, frame dragging and gravitational redshift. The emitted
+   `g = E_cam / (uᵗ · (E − Ω·L))`, where `E_cam = −p·u_cam` is the photon
+   energy the camera measures (`1/√(1−f)` for a hovering camera, which sits
+   deeper in the potential and so sees light blueshifted). This single
+   factor includes Doppler beaming, frame dragging, gravitational redshift
+   and the camera's own motion. The emitted
    temperature follows the Novikov–Thorne flux. Observed colour is a
    blackbody at `g·T`, and brightness scales as `g⁴·F`.
 5. **Progressive refinement.** The image size is the window size × the

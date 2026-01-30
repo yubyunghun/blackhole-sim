@@ -89,6 +89,7 @@ static void cursorPosCB(GLFWwindow*, double x, double y){
 static void mouseCB(GLFWwindow* w, int button, int action, int){
     // presses over the panel belong to the UI; releases always end a drag
     if(action==GLFW_PRESS && uiWantsMouse()) return;
+    if(action==GLFW_PRESS && gFall.active && button==GLFW_MOUSE_BUTTON_LEFT) return;  // no steering mid-dive
     if(button==GLFW_MOUSE_BUTTON_LEFT){
         if(action==GLFW_PRESS){ gCam.dragging=true; gCam.moving=true; glfwGetCursorPos(w,&gCam.lastX,&gCam.lastY); }
         else gCam.dragging=false;
@@ -99,7 +100,7 @@ static void mouseCB(GLFWwindow* w, int button, int action, int){
     }
 }
 static void scrollCB(GLFWwindow*, double, double yoff){
-    if(uiWantsMouse()) return;
+    if(uiWantsMouse() || gFall.active) return;
     gCam.radius -= float(yoff) * float(gCam.zoomSpeed);
     // stay outside the ergosphere (1 rs ~ 1.27e10 m), where a static camera can exist
     gCam.radius = std::clamp(gCam.radius, 2e10f, 1e12f);
@@ -112,6 +113,10 @@ static void keyCB(GLFWwindow* win, int key, int, int action, int){
     if(action==GLFW_PRESS && key==GLFW_KEY_V) setVideoLook(!gVideoLook);
     if(action==GLFW_PRESS && key==GLFW_KEY_F11) setFullscreen(!gFullscreen);
     if(action==GLFW_PRESS && key==GLFW_KEY_F5) reloadShaders();
+    if(action==GLFW_PRESS && key==GLFW_KEY_F){
+        if (!gFall.active) startFall();
+        else { gFall.active = false; gCam = gFall.savedCam; }
+    }
     if(action==GLFW_PRESS && key==GLFW_KEY_P) gScreenshotRequested = true;
     if(action==GLFW_PRESS && key==GLFW_KEY_D){
         gRealDisk = !gRealDisk;
@@ -213,6 +218,8 @@ int main(int argc, char** argv){
     bool startOrbit = false;     // --orbit: start with the stars on circular orbits
     bool startVideo = false;     // --video-look
     bool startFull  = false;     // --fullscreen
+    double diveTo   = -1.0;      // --dive-to R: start a dive, freeze it at radius R
+    bool startDive  = false;     // --dive (with --record: record the fall instead of an orbit)
     // --record <folder> [frames]: one full orbit around the hole, one image per
     // frame (frame_0000.bmp ...), each refined over several progressive passes.
     std::string recordDir;
@@ -233,6 +240,13 @@ int main(int argc, char** argv){
         else if(a == "--fullscreen") startFull = true;
         else if(a == "--coord-camera") gRelCamera = false;
         else if(a == "--time" && i+1 < argc) gTimeOverride = std::max(0.0, std::atof(argv[++i]));  // freeze the animation clock
+        else if(a == "--dive-to" && i+1 < argc) diveTo = std::atof(argv[++i]);   // fall to r (rs), then hold
+        else if(a == "--dive")       startDive = true;   // start falling immediately
+        else if(a == "--camera" && i+2 < argc) {        // --camera <distance rs> <elevation deg>
+            double rr = std::atof(argv[++i]), el = std::atof(argv[++i]);
+            gCam.radius    = float(std::clamp(rr * SAG_RS, 2e10, 1e12));
+            gCam.elevation = float(M_PI * 0.5 - el * M_PI / 180.0);
+        }
         else if(a == "--physics")    { printPhysicsTable(); return 0; }
         else if(a == "--size" && i+1 < argc) {           // e.g. --size 1600x900
             int w = 0, h = 0;
@@ -254,6 +268,14 @@ int main(int argc, char** argv){
     if (startOrbit) orbitStars();
     if (startVideo) setVideoLook(true);
     if (startFull)  setFullscreen(true);
+    if (startDive) startFall();
+    if (diveTo > 0.0) {
+        startFall();
+        while (gFall.active && fallRadius() > diveTo && gFall.tau < 1e4) advanceFall(0.01);
+        gFall.paused = true;
+        std::cout << "[INFO] Dive held at r = " << fallRadius() << " rs (proper time "
+                  << gFall.tau << " rs/c)" << std::endl;
+    }
     int frameCount = 0;
 
     // recording state
@@ -266,6 +288,7 @@ int main(int argc, char** argv){
         std::filesystem::create_directories(recordDir, ec);
         gShowUI = false;
         gTimeOverride = 0.0;
+        if (gFall.active) gFall.paused = true;   // the recorder advances the dive per frame
     }
 
     double lastMoveT = glfwGetTime();
@@ -303,6 +326,7 @@ int main(int argc, char** argv){
         ImGui::Render();
 
         stepGravity(dt);     // physics
+        if (recordDir.empty()) stepFall(dt);   // camera dive (the recorder steps it itself)
         renderScene();       // ray trace, bloom, grid, composite
 
         // decay "moving" flag after a short idle
@@ -331,9 +355,22 @@ int main(int argc, char** argv){
             saveScreenshotBMP((std::filesystem::path(recordDir) / name).string().c_str());
             recPass = 0;
             if (++recFrame >= recordFrames) glfwSetWindowShouldClose(gWin, 1);
-            // next frame: step around the orbit and advance the animation clock
-            gCam.azimuth  = recAz0 + float(2.0 * M_PI * recFrame / recordFrames);
             gTimeOverride = recFrame / REC_FPS;
+            if (gFall.active) {
+                // recording a dive: frames evenly spaced in log r (each 3% closer),
+                // so the approach speeds up smoothly and the end gets enough frames
+                double target = fallRadius() * 0.97;
+                while (fallRadius() > target && gFall.tau < 1e4) advanceFall(0.01);
+                gFall.paused = true;          // hold while the next frame refines
+                gCam.moving = false;          // full-res progressive frames, not the preview
+                double a = gSpin * 0.5, M = 0.5;
+                double rMinus = M - std::sqrt(std::max(M*M - a*a, 0.0));
+                if (fallRadius() <= ((a > 1e-6) ? rMinus * 1.05 + 0.01 : 0.03))
+                    glfwSetWindowShouldClose(gWin, 1);
+            } else {
+                // next frame: step around the orbit
+                gCam.azimuth = recAz0 + float(2.0 * M_PI * recFrame / recordFrames);
+            }
         }
         if (!shotWithUI) drawPanel();
 

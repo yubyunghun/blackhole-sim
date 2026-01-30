@@ -73,6 +73,33 @@ int main(){
         std::snprintf(buf, sizeof buf, "a=%.1f  pixel photon is null", chi);
         check(buf, ksDot(T, p, p), 0.0, 1e-12);
     }
+    {   // gravitational blueshift: a photon with energy 1 at infinity, measured
+        // by a static observer, has energy u^t = 1/sqrt(1 - rs/r)  (a = 0).
+        // (This is the camera factor in the disk redshift g = E_cam / E_emit.)
+        dvec3 x(6.0, 0.0, 0.0);
+        CameraTetrad T = cameraTetrad(x, dvec3(-1,0,0), dvec3(0,1,0), dvec3(0,0,1), 0.0);
+        dvec3 n = normalize(dvec3(0.2, 0.1, 1.0));
+        dvec4 P = T.u - (n.x * T.eR + n.y * T.eU + n.z * T.eF);   // arriving photon
+        double lp = P.x + dot(T.k, dvec3(P.y, P.z, P.w));
+        double pt = -P.x + T.f * lp;                               // covariant p_t
+        dvec4 Pn = P / (-pt);                                      // energy at infinity = 1
+        check("a=0    static observer sees photon blueshifted", -ksDot(T, Pn, T.u),
+              1.0 / std::sqrt(1.0 - 1.0 / 6.0), 1e-12);
+    }
+    {   // free fall from rest conserves the mass shell g(u,u) = -1
+        Camera saved = gCam;
+        double savedSpin = gSpin;
+        gSpin = 0.9;
+        gCam = Camera{};
+        startFall();
+        advanceFall(20.0);
+        dvec4 u = fallVelocity();
+        dvec3 xl(gFall.x);
+        CameraTetrad T = cameraTetrad(xl, dvec3(1,0,0), dvec3(0,1,0), dvec3(0,0,1), gSpin * M, &u);
+        check("a=0.9  free fall keeps g(u,u) = -1", ksDot(T, u, u), -1.0, 1e-8);
+        check("a=0.9  free fall moves inward", fallRadius() < gFall.rStart ? 1.0 : 0.0, 1.0, 0.0);
+        gFall = FreeFall{}; gCam = saved; gSpin = savedSpin;
+    }
     {   // a = 0: Kerr-Schild f reduces to Schwarzschild rs/r
         dvec3 x(5.0, 2.0, -3.0);
         CameraTetrad T = cameraTetrad(x, dvec3(1,0,0), dvec3(0,1,0), dvec3(0,0,1), 0.0);

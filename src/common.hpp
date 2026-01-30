@@ -103,6 +103,9 @@ inline bool  gRelCamera = true;       // relativistic (static-observer tetrad) c
 inline bool  gBloom = true;           // L key
 inline float gBloomStrength = 0.9f;
 inline float gExposure = 1.0f;
+// Automatic exposure during a dive (the falling camera sees the disk heavily
+// blueshifted from close up): multiplies gExposure, 1 otherwise.
+inline float gAutoExposure = 1.0f;
 
 // ---------- Camera ----------
 struct Camera {
@@ -180,7 +183,30 @@ struct CameraTetrad {
     dvec3 k;                // Kerr-Schild k at the camera
     dvec4 u, eF, eR, eU;    // time, forward, right, up (contravariant)
 };
-CameraTetrad cameraTetrad(dvec3 xLocal, dvec3 fwdLocal, dvec3 rightLocal, dvec3 upLocal, double A);
+// uIn: the observer's 4-velocity, or nullptr for a static observer.
+CameraTetrad cameraTetrad(dvec3 xLocal, dvec3 fwdLocal, dvec3 rightLocal, dvec3 upLocal, double A,
+                          const dvec4* uIn = nullptr);
+
+// ---------- Free fall ("dive in"): the camera follows a timelike geodesic ----------
+// Integrated in ingoing Kerr-Schild coordinates (regular across the horizon),
+// in units of rs and rs/c, from rest at the camera's position.
+struct FreeFall {
+    bool   active = false;    // camera is riding the geodesic
+    bool   paused = false;    // keep the falling velocity but don't advance (--dive-to)
+    dvec3  x{0.0}, p{0.0};    // local Kerr-Schild position, covariant spatial momentum
+    double E = 1.0;           // conserved energy per unit mass
+    double tau = 0.0;         // proper time since the start (rs/c)
+    double rStart = 0.0;
+    Camera savedCam;          // camera pose before the dive (restored afterwards)
+    std::string endReason;    // why the last dive ended
+};
+inline FreeFall gFall;
+inline float    gFallSpeed = 6.0f;   // proper time (rs/c) per real second
+void  startFall();                   // from the current camera position, at rest
+void  advanceFall(double dTau);      // move along the geodesic (updates gCam)
+void  stepFall(double realDt);       // advance by realDt * gFallSpeed, end at the singularity
+dvec4 fallVelocity();                // camera 4-velocity u^mu (t, X, Y, Z)
+double fallRadius();                 // current Boyer-Lindquist r of the camera (rs)
 // Inner product under the Kerr-Schild metric g = eta + f l l, l = (1, k)
 double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q);
 void     stepGravity(double realDt);   // N-body step (when gGravity is on)

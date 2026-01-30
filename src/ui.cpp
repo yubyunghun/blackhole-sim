@@ -20,6 +20,20 @@ void drawUI(){
     if (ImGui::CollapsingHeader("Black hole", ImGuiTreeNodeFlags_DefaultOpen)) {
         float spin = float(gSpin);
         if (ImGui::SliderFloat("Spin a/M", &spin, 0.0f, 0.99f, "%.2f")) gSpin = spin;
+        if (!gFall.active) {
+            if (ImGui::Button("Dive in (F)")) startFall();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Let go of the camera: it falls freely from where it is,\n"
+                                  "crosses the event horizon and continues inside");
+        } else {
+            if (ImGui::Button("Stop dive")) { gFall.active = false; gCam = gFall.savedCam; }
+            double r = fallRadius();
+            ImGui::SameLine();
+            ImGui::Text("r = %.2f rs %s", r, r < kerrInfo(gSpin).rPlus ? "(inside!)" : "");
+            ImGui::Text("proper time %.1f rs/c", gFall.tau);
+        }
+        ImGui::SliderFloat("Dive speed", &gFallSpeed, 1.0f, 20.0f, "%.0f");
+        if (!gFall.endReason.empty()) ImGui::TextDisabled("last dive: %s", gFall.endReason.c_str());
         ImGui::Checkbox("Relativistic camera", &gRelCamera);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Pixel directions measured in a static observer's\n"

@@ -366,9 +366,8 @@ int progressiveSamples(){
 }
 
 // ---------- Physics uniforms: Novikov-Thorne disk + relativistic camera ----------
-// Static-observer tetrad at the camera, in local Kerr-Schild coords (t,X,Y,Z),
-// for the spin used in the integration (A = -a, see the shader). Built by
-// Gram-Schmidt under g = eta + f l l, l = (1, k).
+// Camera tetrad in local (ingoing) Kerr-Schild coords (t,X,Y,Z) for the
+// black hole's spin a. Built by Gram-Schmidt under g = eta + f l l, l = (1, k).
 static void setPhysicsUniforms(){
     GLuint P = gProgComp;
     KerrInfo K = kerrInfo(gSpin);
@@ -382,9 +381,14 @@ static void setPhysicsUniforms(){
     dvec3 up = cross(right, fwd);
     auto toLocal = [](dvec3 w){ return dvec3(w.z, w.x, w.y); };   // local = world.zxy
 
-    // static-observer tetrad (physics.cpp), for the integration spin A = -a
-    CameraTetrad T = cameraTetrad(toLocal(pos), toLocal(fwd), toLocal(right), toLocal(up), -gSpin * 0.5);
-    glUniform1i(glGetUniformLocation(P, "uRelCamera"), (gRelCamera && T.ok) ? 1 : 0);
+    // Camera tetrad (physics.cpp): a static observer, or the falling camera's
+    // own 4-velocity during a dive (which can be inside the horizon)
+    dvec4 uFall;
+    if (gFall.active) uFall = fallVelocity();
+    CameraTetrad T = cameraTetrad(toLocal(pos), toLocal(fwd), toLocal(right), toLocal(up), gSpin * 0.5,
+                                  gFall.active ? &uFall : nullptr);
+    bool rel = (gRelCamera || gFall.active) && T.ok;
+    glUniform1i(glGetUniformLocation(P, "uRelCamera"), rel ? 1 : 0);
     if (!T.ok) return;
 
     auto set4 = [&](const char* n, dvec4 v){
@@ -439,6 +443,41 @@ static void dispatchCompute(){
     glDispatchCompute(GLuint((tw + 15) / 16), GLuint((th + 15) / 16), 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
     gTexCur = target;
+}
+
+// ---------- Auto exposure (dives only) ----------
+// A diving camera sees the disk blueshifted by orders of magnitude, with huge
+// contrast, so expose for the highlights: read a coarse (~30x16) level of the
+// HDR image's mip chain (local averages) and scale so the brightest region
+// lands just below white. Adapts smoothly, like an eye or a camera.
+static void updateAutoExposure(double dt){
+    if (!gFall.active || !gRealDisk) {           // normal viewing: fixed exposure
+        gAutoExposure = 1.0f;
+        return;
+    }
+    glBindTexture(GL_TEXTURE_2D, gTexCur);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    GLint w = 0, h = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,  &w);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+    int top = int(std::floor(std::log2(double(std::max(w, h)))));
+    int level = std::max(top - 5, 0);                            // ~32 texels across
+    GLint lw = 0, lh = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, level, GL_TEXTURE_WIDTH,  &lw);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, level, GL_TEXTURE_HEIGHT, &lh);
+    std::vector<float> px(size_t(std::max(lw, 1)) * std::max(lh, 1) * 4);
+    glGetTexImage(GL_TEXTURE_2D, level, GL_RGBA, GL_FLOAT, px.data());
+    float lum = 0.0f;                                            // brightest local average
+    for (size_t i = 0; i + 3 < px.size(); i += 4)
+        lum = std::max(lum, 0.2126f*px[i] + 0.7152f*px[i+1] + 0.0722f*px[i+2]);
+    // ACES handles highlights up to ~6 gracefully, so only start reducing the
+    // exposure beyond that (normal views keep their usual look)
+    float target = std::clamp(6.0f / std::max(lum, 1e-6f), 1e-5f, 1.0f);
+    float k = float(1.0 - std::exp(-dt * 3.0));                 // ~1/3 s adaptation
+    gAutoExposure += (target - gAutoExposure) * k;
+    if (std::getenv("BH_DEBUG_EXPOSURE"))
+        std::fprintf(stderr, "[exposure] r=%.3f max local lum=%g level=%d (%dx%d) exp=%g\n",
+                     fallRadius(), lum, level, lw, lh, gAutoExposure);
 }
 
 // ---------- Post-processing: bloom + tone mapping ----------
@@ -521,7 +560,7 @@ static void drawQuad(){
     glUniform1i(glGetUniformLocation(gProgComposite,"uBloomB"), 2);
     glUniform1f(glGetUniformLocation(gProgComposite,"uBloom"), gBloom ? gBloomStrength : 0.0f);
     glUniform1i(glGetUniformLocation(gProgComposite,"uTonemap"), gRealDisk ? 1 : 0);
-    glUniform1f(glGetUniformLocation(gProgComposite,"uExposure"), gExposure);
+    glUniform1f(glGetUniformLocation(gProgComposite,"uExposure"), gExposure * gAutoExposure);
     glBindVertexArray(gVAOQuad);
     glDisable(GL_DEPTH_TEST);
     // Blend the ray-traced image over the grid: empty space (alpha 0) lets the
@@ -589,6 +628,11 @@ void renderScene(){
     uploadObjsUBO();
 
     dispatchCompute();                    // ray trace
+    static double lastT = glfwGetTime();
+    double now = glfwGetTime();
+    // (held dives, e.g. --dive-to, adapt instantly so the first frame is right)
+    updateAutoExposure(gFall.paused ? 10.0 : now - lastT);
+    lastT = now;
     runBloom();
 
     // overlay grid (mode 2): 60 deg FOV to match the ray tracer, so they line up

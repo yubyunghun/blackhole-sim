@@ -38,8 +38,9 @@ double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q){
     return eta + T.f * dot(l, p) * dot(l, q);
 }
 
-// Gram-Schmidt of the static observer's frame under g = eta + f l l.
-CameraTetrad cameraTetrad(dvec3 x, dvec3 fwd, dvec3 right, dvec3 up, double A){
+// Gram-Schmidt of the observer's frame under g = eta + f l l. The observer is
+// static (u along the time direction) unless a 4-velocity is given.
+CameraTetrad cameraTetrad(dvec3 x, dvec3 fwd, dvec3 right, dvec3 up, double A, const dvec4* uIn){
     const double M = 0.5;
     CameraTetrad T{};
     double a2 = A*A;
@@ -47,10 +48,14 @@ CameraTetrad cameraTetrad(dvec3 x, dvec3 fwd, dvec3 right, dvec3 up, double A){
     double r = std::sqrt(0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)));
     T.f = 2.0*M*r*r*r / (r*r*r*r + a2*x.z*x.z);
     T.k = dvec3((r*x.x + A*x.y)/(r*r + a2), (r*x.y - A*x.x)/(r*r + a2), x.z/r);
-    T.ok = T.f < 0.98;      // static observers exist only outside the ergosphere
-    if (!T.ok) return T;
-
-    T.u = dvec4(1.0 / std::sqrt(1.0 - T.f), 0, 0, 0);   // g(u,u) = -1
+    if (uIn) {
+        T.ok = true;            // a moving (e.g. falling) observer can be anywhere
+        T.u = *uIn;
+    } else {
+        T.ok = T.f < 0.98;      // static observers exist only outside the ergosphere
+        if (!T.ok) return T;
+        T.u = dvec4(1.0 / std::sqrt(1.0 - T.f), 0, 0, 0);   // g(u,u) = -1
+    }
     auto spatial = [&](dvec3 v){ dvec4 V(0.0, v.x, v.y, v.z); return V + ksDot(T, T.u, V) * T.u; };
     auto unit = [&](dvec4 v){ return v / std::sqrt(ksDot(T, v, v)); };
     T.eF = unit(spatial(fwd));
@@ -85,6 +90,119 @@ KerrInfo kerrInfo(double chi){
     double omegaHM = chi / (2.0 * (1.0 + std::sqrt(1.0 - chi*chi)));
     k.horizonPeriod = (omegaHM > 0.0) ? 2.0*M_PI * tM / omegaHM : 0.0;
     return k;
+}
+
+// ---------- Geodesics on the CPU (double precision) ----------
+// Same Kerr-Schild Hamiltonian as the shader, for a particle of energy E
+// (E = 1 for a photon normalised to unit energy):
+//   H = 1/2 (-E^2 + |p|^2 - f S^2),  S = E + k.p
+//   dx/dtau = p - f S k,   dt/dtau = E + f S,
+//   dp/dtau = 1/2 (S^2 grad f + 2 f S grad S)
+// H = 0 for light, -1/2 for a massive particle (tau = proper time).
+struct KS { double r, f; dvec3 k; };
+static KS ksAt(dvec3 x, double A){
+    const double M = 0.5;
+    double a2 = A*A, w = dot(x,x) - a2;
+    double r2 = 0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)), r = std::sqrt(r2);
+    KS s; s.r = r;
+    s.f = 2.0*M*r2*r / (r2*r2 + a2*x.z*x.z);
+    s.k = dvec3((r*x.x + A*x.y)/(r2 + a2), (r*x.y - A*x.x)/(r2 + a2), x.z/r);
+    return s;
+}
+static void geodesicRHS(dvec3 x, dvec3 p, double E, double A, dvec3& dx, dvec3& dp){
+    const double M = 0.5;
+    double a2 = A*A, R2 = dot(x,x), w = R2 - a2;
+    double r2 = 0.5*(w + std::sqrt(w*w + 4.0*a2*x.z*x.z)), r = std::sqrt(r2);
+    double P = r2 + a2, Q = r2*r2 + a2*x.z*x.z;
+    double f = 2.0*M*r2*r / Q;
+    dvec3  k((r*x.x + A*x.y)/P, (r*x.y - A*x.x)/P, x.z/r);
+    double S = E + dot(k, p);
+    dx = p - f*S*k;
+    double den = 2.0*r2 - R2 + a2;
+    dvec3 gr = dvec3(x.x*r, x.y*r, x.z*(r2 + a2)/r) / den;
+    dvec3 gQ = 4.0*r2*r*gr + dvec3(0.0, 0.0, 2.0*a2*x.z);
+    dvec3 gf = 2.0*M * (3.0*r2*Q*gr - r2*r*gQ) / (Q*Q);
+    double c = (p.x*x.x + p.y*x.y)/P
+             - 2.0*r*(p.x*(r*x.x + A*x.y) + p.y*(r*x.y - A*x.x))/(P*P)
+             - p.z*x.z/r2;
+    dvec3 gS = c*gr + dvec3((r*p.x - A*p.y)/P, (A*p.x + r*p.y)/P, p.z/r);
+    dp = 0.5 * (S*S*gf + 2.0*f*S*gS);
+}
+static void geodesicRK4(dvec3& x, dvec3& p, double E, double A, double h){
+    dvec3 k1x,k1p,k2x,k2p,k3x,k3p,k4x,k4p;
+    geodesicRHS(x,            p,            E, A, k1x, k1p);
+    geodesicRHS(x + 0.5*h*k1x, p + 0.5*h*k1p, E, A, k2x, k2p);
+    geodesicRHS(x + 0.5*h*k2x, p + 0.5*h*k2p, E, A, k3x, k3p);
+    geodesicRHS(x + h*k3x,    p + h*k3p,    E, A, k4x, k4p);
+    x += h/6.0 * (k1x + 2.0*k2x + 2.0*k3x + k4x);
+    p += h/6.0 * (k1p + 2.0*k2p + 2.0*k3p + k4p);
+}
+
+// ---------- Free fall ----------
+static double spinA(){ return gSpin * 0.5; }          // a in rs units (M = 0.5)
+static dvec3 camLocal(){ dvec3 w = dvec3(gCam.position()) / SAG_RS; return dvec3(w.z, w.x, w.y); }
+static void setCamFromLocal(dvec3 x){
+    dvec3 w(x.y, x.z, x.x);                            // world = local.yzx
+    double R = length(w);
+    gCam.radius    = float(R * SAG_RS);
+    gCam.elevation = float(std::acos(std::clamp(w.y / R, -1.0, 1.0)));
+    gCam.azimuth   = float(std::atan2(w.z, w.x));
+    gCam.moving    = true;                             // fast preview while falling
+}
+
+double fallRadius(){ return ksAt(gFall.active ? gFall.x : camLocal(), spinA()).r; }
+
+void startFall(){
+    // start at rest = the static observer at the camera: u = (1/sqrt(1-f), 0)
+    dvec3 x = camLocal();
+    KS s = ksAt(x, spinA());
+    if (s.f >= 0.98) return;                           // can't hover here
+    double ut = 1.0 / std::sqrt(1.0 - s.f);
+    gFall = FreeFall{};
+    gFall.active = true;
+    gFall.savedCam = gCam;
+    gFall.x = x;
+    gFall.E = (1.0 - s.f) * ut;                        // -p_t = sqrt(1 - f)
+    gFall.p = s.f * ut * s.k;                          // p_i = f k_i (l.u), l.u = u^t
+    gFall.rStart = s.r;
+}
+
+dvec4 fallVelocity(){
+    KS s = ksAt(gFall.x, spinA());
+    double S = gFall.E + dot(s.k, gFall.p);
+    dvec3 dx = gFall.p - s.f * S * s.k;
+    return dvec4(gFall.E + s.f * S, dx.x, dx.y, dx.z);
+}
+
+void advanceFall(double dTau){
+    // adaptive steps: small near the hole (and the singularity)
+    while (dTau > 0.0) {
+        double r = ksAt(gFall.x, spinA()).r;
+        double h = std::min(dTau, 0.004 * std::max(r, 0.05));
+        geodesicRK4(gFall.x, gFall.p, gFall.E, spinA(), h);
+        gFall.tau += h; dTau -= h;
+    }
+    setCamFromLocal(gFall.x);
+}
+
+void stepFall(double realDt){
+    if (!gFall.active || gFall.paused) return;
+    advanceFall(std::min(realDt, 0.05) * gFallSpeed);
+    // end the dive at the singularity (a = 0) or just before the inner horizon
+    // (a > 0), where the Kerr interior stops being physically meaningful
+    double a = spinA(), M = 0.5;
+    double rMinus = M - std::sqrt(std::max(M*M - a*a, 0.0));
+    double rEnd = (a > 1e-6) ? rMinus * 1.05 + 0.01 : 0.03;
+    double r = ksAt(gFall.x, a).r;
+    if (r <= rEnd) {
+        char buf[128];
+        std::snprintf(buf, sizeof buf, "%s at r = %.2f rs after %.1f rs/c of proper time",
+                      a > 1e-6 ? "reached the inner horizon" : "hit the singularity", r, gFall.tau);
+        gFall.endReason = buf;
+        gFall.active = false;
+        std::cout << "[INFO] Dive ended: " << buf << std::endl;
+        gCam = gFall.savedCam;     // back to where the dive started
+    }
 }
 
 // ---------- N-body gravity ----------
