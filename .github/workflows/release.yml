@@ -1,0 +1,31 @@
+# Pushing a version tag (e.g. git tag v1.0.0 && git push origin v1.0.0) builds
+# the self-contained Windows zip and publishes it as a GitHub Release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build and package
+        shell: pwsh
+        run: ./scripts/package_release.ps1 -Version ("${{ github.ref_name }}".TrimStart('v'))
+
+      - name: Physics self-test
+        run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

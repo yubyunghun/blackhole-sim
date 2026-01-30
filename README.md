@@ -164,13 +164,15 @@ included in `third_party/`.
 main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity]
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
          [--no-ui] [--video-look] [--size WxH] [--fullscreen] [--coord-camera]
+         [--time seconds] [--record folder [frames]]
 main.exe --physics
 ```
 
 `--screenshot` renders the given number of frames (default 20), saves the last
 one and exits. It's useful for testing. `--shot-ui` includes the panel in the
 screenshot, and `--orbit` starts with the stars on circular orbits. `--size`
-sets the starting window size (default `1280x720`).
+sets the starting window size (default `1280x720`). `--time` freezes the gas
+animation clock at the given time, so renders are repeatable.
 
 `--record <folder> [frames]` flies the camera once around the hole (default 72
 frames). It saves `frame_0000.bmp`, … with each frame refined over 12
@@ -182,6 +184,36 @@ main.exe --record frames 72
 ``` `--coord-camera` turns off
 the relativistic camera. `--physics` prints the table of Kerr radii and
 efficiencies below and exits.
+
+## Testing
+
+The project has two layers of checks:
+
+- **Physics self-test** (`bh_tests`, no GPU needed). It runs 26 checks of the
+  CPU-side physics against published values and exact identities:
+  - Kerr horizon, photon orbits, ISCO and efficiency for several spins
+  - Novikov–Thorne flux: zero at the ISCO, ~r⁻³ far out, peak at 9.55M
+  - the camera tetrad is orthonormal under the Kerr metric, and pixel photons
+    are null
+  - the analytic shadow size
+
+  It's built by both build systems. Run `ctest` (CMake) or `bh_tests.exe`.
+  **GitHub Actions** builds on Windows and Linux and runs it on every push.
+- **Render checks** (`scripts/run_checks.ps1`, needs a GPU, run locally):
+  - renders four reference views (flat reference, video look, Kerr flat,
+    full relativistic with the animation clock frozen by `--time`) and
+    compares them to [`tests/golden/`](tests/golden), with a tolerance for
+    GPU differences
+  - measures the shadow radius against theory (134.2 px)
+
+  After an intended visual change, run it with `-UpdateGolden`.
+
+```bat
+powershell -ExecutionPolicy Bypass -File scripts/run_checks.ps1
+```
+
+Pushing a version tag (`git tag v1.0.0 && git push origin v1.0.0`) makes
+GitHub Actions build the Windows zip and publish it as a Release.
 
 ## Physics
 

@@ -1,0 +1,40 @@
+# Build on Windows and Linux and run the physics self-test.
+# (CI machines have no GPU, so the render checks in scripts/run_checks.ps1
+# are run locally instead.)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install GLFW and OpenGL headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libglfw3-dev libgl1-mesa-dev
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build -A x64 -DBH_STATIC_RUNTIME=ON
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Physics self-test
+        run: ctest --test-dir build -C Release --output-on-failure
