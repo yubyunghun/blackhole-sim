@@ -239,6 +239,8 @@ int main(int argc, char** argv){
         else if(a == "--video-look") startVideo = true;
         else if(a == "--fullscreen") startFull = true;
         else if(a == "--coord-camera") gRelCamera = false;
+        else if(a == "--thick-disk") gThickDisk = true;
+        else if(a == "--disk-thickness" && i+1 < argc) gDiskThick = float(std::clamp(std::atof(argv[++i]), 0.02, 0.3));
         else if(a == "--time" && i+1 < argc) gTimeOverride = std::max(0.0, std::atof(argv[++i]));  // freeze the animation clock
         else if(a == "--dive-to" && i+1 < argc) diveTo = std::atof(argv[++i]);   // fall to r (rs), then hold
         else if(a == "--dive")       startDive = true;   // start falling immediately

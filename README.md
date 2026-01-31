@@ -41,6 +41,13 @@ relativistic effects.
   inside, with the light blueshifted by its own motion, until it reaches the
   singularity (spin 0) or the inner horizon (spinning hole). Exposure adapts
   automatically during a dive.
+- **Thick, glowing disk** (optional). Semi-transparent gas with a Gaussian
+  vertical profile of scale height H/r, instead of an infinitely thin
+  surface. Rays sample the gas, which both emits (same Novikov–Thorne /
+  Doppler model) and absorbs, so it is opaque at the midplane and translucent
+  at the surface. It costs about 30–65% more render time.
+
+  ![Thin disk vs thick disk](docs/thick.png)
 - **Animated gas.** A procedural texture with differential rotation: inner
   rings orbit faster than outer ones.
 - **HDR bloom and ACES tone mapping.**
@@ -178,7 +185,7 @@ main.exe [--screenshot out.bmp [frames]] [--shot-ui] [--spin 0..0.99] [--gravity
          [--orbit] [--flat-disk] [--no-stars] [--no-bloom] [--grid ray|off|overlay]
          [--no-ui] [--video-look] [--size WxH] [--fullscreen] [--coord-camera]
          [--time seconds] [--record folder [frames]] [--camera distance_rs elevation_deg]
-         [--dive] [--dive-to r_rs]
+         [--dive] [--dive-to r_rs] [--thick-disk] [--disk-thickness H_over_r]
 main.exe --physics
 ```
 
@@ -229,8 +236,8 @@ The project has two layers of checks:
   It's built by both build systems. Run `ctest` (CMake) or `bh_tests.exe`.
   **GitHub Actions** builds on Windows and Linux and runs it on every push.
 - **Render checks** (`scripts/run_checks.ps1`, needs a GPU, run locally):
-  - renders four reference views (flat reference, video look, Kerr flat,
-    full relativistic with the animation clock frozen by `--time`) and
+  - renders five reference views (flat reference, video look, Kerr flat,
+    full relativistic with the animation clock frozen by `--time`, thick disk) and
     compares them to [`tests/golden/`](tests/golden), with a tolerance for
     GPU differences
   - measures the shadow radius against theory (134.2 px)

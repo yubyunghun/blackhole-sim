@@ -98,6 +98,8 @@ inline float gDiskOuter = 5.2f;       // outer radius (rs)
 inline bool  gShowUI    = true;       // H key
 inline bool  gVideoLook = false;      // V key: match the look of the reference video
 inline bool  gRelCamera = true;       // relativistic (static-observer tetrad) camera
+inline bool  gThickDisk = false;      // volumetric (thick, semi-transparent) disk
+inline float gDiskThick = 0.08f;      // its scale height H/r
 
 // Post-processing
 inline bool  gBloom = true;           // L key

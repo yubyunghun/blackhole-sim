@@ -80,6 +80,7 @@ $cases = [ordered]@{
     "video-look"     = @("--video-look")
     "kerr-flat"      = @("--flat-disk","--no-bloom")
     "kerr-full"      = @("--time","2")
+    "thick-disk"     = @("--time","2","--thick-disk")
 }
 foreach ($name in $cases.Keys) {
     $img = Render $name $cases[$name]

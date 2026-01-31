@@ -236,7 +236,8 @@ static void uploadCameraUBO(){
     data.camRight = vec4(right,0);
     data.camUp    = vec4(up,0);
     data.camFwd   = vec4(fwd,0);
-    float flags = float((gRealDisk ? 1 : 0) | (gShowStars ? 2 : 0) | (gVideoLook ? 4 : 0));
+    float flags = float((gRealDisk ? 1 : 0) | (gShowStars ? 2 : 0) | (gVideoLook ? 4 : 0) |
+                        (gThickDisk ? 8 : 0));
     data.params   = vec4(tan(radians(60.0f*0.5f)), viewAspect(), gCam.moving?1.0f:0.0f, flags);
 
     Target t = currentTarget();
@@ -339,8 +340,8 @@ static void initRenderTargets(){
 // Anything that changes the picture (other than the animated gas, which the
 // moving average handles) restarts the accumulation.
 static bool sceneChanged(){
-    static double last[16] = {};
-    double now[16] = { gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
+    static double last[18] = {};
+    double now[18] = { double(gThickDisk), gDiskThick, gCam.radius, gCam.azimuth, gCam.elevation, gSpin,
                        double(gRealDisk), double(gShowStars), double(gGridMode),
                        double(gObjs.size()), double(gWinW), double(gWinH),
                        double(gStillW), gDiskTemp, gDiskGain, gGasSpeed, gDiskOuter,
@@ -461,6 +462,7 @@ static void dispatchCompute(){
     glUniform1f(glGetUniformLocation(gProgComp, "uDiskTemp"), gDiskTemp);
     glUniform1f(glGetUniformLocation(gProgComp, "uDiskGain"), gDiskGain);
     glUniform1f(glGetUniformLocation(gProgComp, "uGasSpeed"), gGasSpeed);
+    glUniform1f(glGetUniformLocation(gProgComp, "uDiskH"), gDiskThick);
     setPhysicsUniforms();
 
     glBindImageTexture(0, target, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);

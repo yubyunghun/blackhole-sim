@@ -66,6 +66,15 @@ void drawUI(){
         ImGui::SliderFloat("Gas speed", &gGasSpeed, 0.0f, 12.0f, "%.1f");
         ImGui::EndDisabled();
         ImGui::SliderFloat("Outer radius rs", &gDiskOuter, 3.0f, 10.0f, "%.1f");
+        ImGui::BeginDisabled(!gRealDisk);
+        ImGui::Checkbox("Thick disk (glowing gas)", &gThickDisk);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Semi-transparent gas of scale height H instead of a thin\n"
+                              "opaque surface. Slower: rays sample the gas volume.");
+        ImGui::BeginDisabled(!gThickDisk);
+        ImGui::SliderFloat("Thickness H/r", &gDiskThick, 0.02f, 0.3f, "%.2f");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
     }
 
     if (ImGui::CollapsingHeader("View")) {

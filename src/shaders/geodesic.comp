@@ -287,6 +287,7 @@ float gasAt(float r, float phi){
 uniform float uGasSpeed;     // angular speed scale (rad/s at r = 1 rs), default 4
 uniform float uDiskTemp;     // peak disk temperature (K), Novikov-Thorne profile
 uniform float uDiskGain;     // brightness multiplier, default 1.5
+uniform float uDiskH;        // thick disk: scale height H/r
 const float FLOW_P = 4.0;    // seconds per flow cycle
 float gasDensity(float r, float phi, float t){
     float omega = uGasSpeed * pow(r, -1.5);
@@ -432,6 +433,8 @@ void main(){
     bool realDisk = (flags & 1) != 0;
     bool showStars = (flags & 2) != 0;
     bool videoLook = (flags & 4) != 0;   // match the reference video's look
+    // thick disk: semi-transparent glowing gas instead of a thin opaque surface
+    bool thickDisk = (flags & 8) != 0 && realDisk && !videoLook;
 
     RS = disk.z;
     float r1 = disk.x / RS, r2 = disk.y / RS;   // Boyer-Lindquist radii (rs units)
@@ -518,7 +521,7 @@ void main(){
 
         // accretion disk: crossing of the y=0 plane, interpolated
         // strict sign change: a ray starting exactly on the plane (camera at y=0) isn't a hit
-        if (p0.y * p1.y < 0.0) {
+        if (!thickDisk && p0.y * p1.y < 0.0) {
             float t = p0.y / (p0.y - p1.y);
             vec3 pc = mix(p0, p1, t);
             // in the equatorial plane, Kerr-Schild R^2 = r^2 + a^2
@@ -555,6 +558,40 @@ void main(){
                     float a = GRID_ALPHA * cov;
                     front += (1.0 - front.a) * vec4(GRID_COLOR * a, a);
                 }
+            }
+        }
+        // Thick disk: gas with density exp(-y^2 / 2H^2), H = (H/r) r, between
+        // the ISCO and the outer edge. Sample the part of this step in front of
+        // any hit; each sample emits (same Novikov-Thorne / Doppler / gas model
+        // as the thin disk) and absorbs (vertical optical depth ~7 at the
+        // midplane: opaque in the middle, translucent at the surface).
+        if (thickDisk && front.a < 0.995) {
+            float Hmax = 3.0 * uDiskH * r2;
+            bool nearSlab = min(abs(p0.y), abs(p1.y)) < Hmax || p0.y * p1.y < 0.0;
+            if (nearSlab) {
+                const int K = 6;
+                float tEnd = min(bestT, 1.0);
+                float ds = segLen * tEnd / float(K);
+                for (int s = 0; s < K && front.a < 0.995; ++s) {
+                    vec3 q = mix(p0, p1, (float(s) + 0.5) / float(K) * tEnd);
+                    float rr = sqrt(max(dot(q.xz, q.xz) - aPhys*aPhys, 0.0));
+                    if (rr < r1 || rr > r2) continue;          // no gas inside the ISCO
+                    // flared (H ~ r), but tapering over the outer 40% so the rim is
+                    // rounded rather than the side of a cylinder
+                    float Hl = uDiskH * rr * mix(0.3, 1.0, smoothstep(r2, r2 - 0.4 * (r2 - r1), rr));
+                    float z = q.y / Hl;
+                    if (abs(z) > 3.0) continue;
+                    // density fades out at both edges together with the emission,
+                    // so the edges are thin glowing gas, not dark opaque walls
+                    float rho = exp(-0.5 * z * z)
+                              * smoothstep(r2, r2 - 0.3 * (r2 - r1), rr)
+                              * smoothstep(r1, r1 + 0.1 * (r2 - r1), rr);
+                    float g = kerrDiskG(rr, aPhys, Lphys, E_CAM);
+                    vec3 S = diskColorRelativistic(q, rr, g, r1, r2, disk.w).rgb;
+                    float alpha = 1.0 - exp(-(3.0 / Hl) * rho * ds);
+                    front += (1.0 - front.a) * vec4(S * alpha, alpha);
+                }
+                if (front.a >= 0.995) done = true;           // fully hidden behind the gas
             }
         }
         travel += segLen;
