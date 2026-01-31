@@ -368,8 +368,34 @@ int progressiveSamples(){
 // ---------- Physics uniforms: Novikov-Thorne disk + relativistic camera ----------
 // Camera tetrad in local (ingoing) Kerr-Schild coords (t,X,Y,Z) for the
 // black hole's spin a. Built by Gram-Schmidt under g = eta + f l l, l = (1, k).
+// Embedding-diagram table for the ray-traced grid (see geodesic.comp),
+// rebuilt only when the spin changes.
+static void uploadGridTable(GLuint P){
+    static double cachedSpin = -1.0;
+    static float H[128];
+    static float dMin = 1.0f, sMax = 1.0f, hMax = 0.0f;
+    if (gSpin != cachedSpin) {
+        cachedSpin = gSpin;
+        const double M = 0.5, a = gSpin * M;
+        double rPlus = M + std::sqrt(M*M - a*a);
+        double d0 = std::sqrt(rPlus*rPlus + a*a);            // horizon, Kerr-Schild cylindrical radius
+        double dMax = 13.0 * 1e10 / SAG_RS * 1.4143;          // grid corners (GRID_HALF cells)
+        double s1 = std::sqrt(dMax - d0);
+        for (int i = 0; i < 128; ++i) {
+            double s = s1 * i / 127.0;
+            double d = d0 + s*s;
+            double r = std::sqrt(std::max(d*d - a*a, rPlus*rPlus));   // Boyer-Lindquist r
+            H[i] = float(kerrEmbeddingHeight(r, gSpin));
+        }
+        dMin = float(d0); sMax = float(s1); hMax = H[127];
+    }
+    glUniform1fv(glGetUniformLocation(P, "uGridH"), 128, H);
+    glUniform3f(glGetUniformLocation(P, "uGridP"), dMin, sMax, hMax);
+}
+
 static void setPhysicsUniforms(){
     GLuint P = gProgComp;
+    uploadGridTable(P);
     KerrInfo K = kerrInfo(gSpin);
     glUniform4f(glGetUniformLocation(P, "uNT"), float(gSpin),
                 float(std::sqrt(K.rIsco / 0.5)), float(1.0 / std::max(K.fluxMax, 1e-30)), 0.0f);

@@ -48,9 +48,11 @@ relativistic effects.
   camera. When it stops, the full-res image is refined over the next frames
   with jittered samples (anti-aliasing), tracing only a quarter of the pixels
   per frame so it stays at 60 FPS.
-- **Ray-traced spacetime grid.** The black hole's embedding diagram (Flamm's
-  paraboloid) is drawn as a grid that light rays actually hit, so it is
-  lensed, wraps around the shadow, and is hidden behind the hole.
+- **Ray-traced spacetime grid.** The embedding diagram of the hole's
+  equatorial plane is drawn as a grid that light rays actually hit, so it is
+  lensed, wraps around the shadow, and is hidden behind the hole. It is
+  Flamm's paraboloid at spin 0, and the Kerr equatorial embedding for a
+  spinning hole (kept flat where that geometry can't be embedded in 3D).
 - **Relativistic star orbits.** With gravity on, the stars follow Kerr
   geodesics (the same integrator as the falling camera). Their orbits precess,
   plunge inside the ISCO, feel frame dragging, and stars are swallowed at the
@@ -212,7 +214,7 @@ efficiencies below and exits.
 
 The project has two layers of checks:
 
-- **Physics self-test** (`bh_tests`, no GPU needed). It runs 33 checks of the
+- **Physics self-test** (`bh_tests`, no GPU needed). It runs 36 checks of the
   CPU-side physics against published values and exact identities:
   - Kerr horizon, photon orbits, ISCO and efficiency for several spins
   - Novikov–Thorne flux: zero at the ISCO, ~r⁻³ far out, peak at 9.55M

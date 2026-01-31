@@ -180,6 +180,14 @@ int main(){
         check("a=0    perihelion precession vs exact GR (rad)", phiApo - 2.0 * M_PI, exact, 0.01 * exact);
         gSpin = savedSpin;
     }
+    {   // embedding diagram: a = 0 is Flamm's paraboloid z = 2 sqrt(r - 1) (rs units)
+        check("a=0    embedding height at r=2 (Flamm)",  kerrEmbeddingHeight(2.0, 0.0), 2.0, 2e-3);
+        check("a=0    embedding height at r=10 (Flamm)", kerrEmbeddingHeight(10.0, 0.0), 6.0, 2e-3);
+        // with spin, far from the hole the geometry is nearly the same
+        check("a=0.9  embedding slope ~ Flamm far out",
+              kerrEmbeddingHeight(41.0, 0.9) - kerrEmbeddingHeight(37.0, 0.9),
+              2.0*std::sqrt(40.0) - 2.0*std::sqrt(36.0), 0.01);
+    }
     {   // a = 0: Kerr-Schild f reduces to Schwarzschild rs/r
         dvec3 x(5.0, 2.0, -3.0);
         CameraTetrad T = cameraTetrad(x, dvec3(1,0,0), dvec3(0,1,0), dvec3(0,0,1), 0.0);

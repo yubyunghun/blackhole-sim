@@ -31,6 +31,33 @@ double ntFlux(double rOverM, double chi){
     return ntFluxCPU(rOverM, chi, std::sqrt(iscoOverM(chi)));
 }
 
+// ---------- Embedding diagram of the equatorial plane ----------
+// At constant t in the equatorial plane:  dl^2 = (r^2/Delta) dr^2 + Rc^2 dphi^2
+// with Delta = r^2 - 2Mr + a^2 and Rc^2 = r^2 + a^2 + 2Ma^2/r (circumference
+// radius). Embedded as a surface of revolution with radius Rc:
+//   z(r) = int_{r+}^{r} sqrt(r^2/Delta - Rc'(r)^2) dr.
+// Close to the horizon of a fast spinner the integrand goes negative: that
+// part of the geometry can't be embedded in flat 3D space, so it's kept flat.
+// The substitution r = r+ + u^2 removes the 1/sqrt(r - r+) singularity.
+double kerrEmbeddingHeight(double r, double chi){
+    const double M = 0.5, a = chi * M, a2 = a*a;
+    double rp = M + std::sqrt(M*M - a2), rm = M - std::sqrt(M*M - a2);
+    if (r <= rp) return 0.0;
+    double U = std::sqrt(r - rp);
+    const int N = 2000;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        double u  = U * (i + 0.5) / N;
+        double rr = rp + u*u;
+        double Rc = std::sqrt(rr*rr + a2 + 2.0*M*a2/rr);
+        double dRc = (rr - M*a2/(rr*rr)) / Rc;
+        // integrand * dr/du (= 2u), with Delta = (r - r+)(r - r-) = u^2 (r - r-)
+        double g = rr*rr / (rr - rm) - u*u * dRc*dRc;
+        sum += 2.0 * std::sqrt(std::max(g, 0.0));
+    }
+    return sum * U / N;
+}
+
 // ---------- Camera tetrad ----------
 double ksDot(const CameraTetrad& T, const dvec4& p, const dvec4& q){
     dvec4 l(1.0, T.k.x, T.k.y, T.k.z);

@@ -368,11 +368,12 @@ vec4 diskColorRelativistic(vec3 pc, float r, float g, float r1, float r2, float 
 }
 
 // ---------------------------------------------------------------------------
-// Ray-traced spacetime grid: Flamm's paraboloid, the embedding diagram of the
-// Schwarzschild geometry:  y(d) = Y0 + 2*sqrt(rs*(d - rs)),  d = horizontal
-// distance from the hole. Light rays hit it like any other surface, so the
-// grid is lensed, wraps around the shadow, and is hidden behind the hole.
-// Only the lines are drawn; rays pass through the gaps and continue.
+// Ray-traced spacetime grid: the embedding diagram of the hole's equatorial
+// plane (Flamm's paraboloid y = Y0 + 2 sqrt(rs (r - rs)) for a = 0; for a
+// spinning hole the Kerr equatorial embedding, computed on the CPU into the
+// table uGridH). Light rays hit it like any other surface, so the grid is
+// lensed, wraps around the shadow, and is hidden behind the hole. Only the
+// lines are drawn; rays pass through the gaps and continue.
 // ---------------------------------------------------------------------------
 const float GRID_SPACING_M = 1e10;   // line spacing (metres), same as the old CPU grid
 const float GRID_HALF      = 13.0;   // half-extent in cells
@@ -400,10 +401,24 @@ void writeSample(ivec2 pix, vec4 c, int W, int H){
     }
 }
 
+// Embedding height table: GRID_N samples evenly spaced in s = sqrt(d - dMin),
+// where d is the Kerr-Schild cylindrical radius and dMin = sqrt(r+^2 + a^2)
+// the horizon. (The height grows like sqrt(d - dMin) at the throat, so this
+// spacing makes it nearly linear in s.)
+const int GRID_N = 128;
+uniform float uGridH[GRID_N];
+uniform vec3  uGridP;    // x = dMin, y = s at the last sample, z = largest height
+
+float gridHeight(float d){
+    float s = sqrt(max(d - uGridP.x, 0.0));
+    float t = clamp(s / uGridP.y, 0.0, 1.0) * float(GRID_N - 1);
+    int i = min(int(t), GRID_N - 2);
+    return mix(uGridH[i], uGridH[i + 1], t - float(i));
+}
+
 // signed height above the surface (rs units, rs = 1)
 float gridF(vec3 p, float y0){
-    float d = max(length(p.xz), 1.0);
-    return p.y - (y0 + 2.0 * sqrt(d - 1.0));
+    return p.y - (y0 + gridHeight(length(p.xz)));
 }
 
 void main(){
@@ -462,7 +477,7 @@ void main(){
     float pixAngle = 2.0 * CAM.params.x / float(HEIGHT);   // radians per pixel
     float travel = 0.0;                                     // distance along the ray
     // highest point of the grid (its corners): steps entirely above it skip the test
-    float gTop = gY0 + 2.0 * sqrt(1.4143 * gExt - 1.0);
+    float gTop = gY0 + uGridP.z;
 
     for (int i = 0; i < MAX_STEPS && !done; ++i){
         float R = length(x);
@@ -530,7 +545,7 @@ void main(){
             if (f0 * f1 < 0.0) {
                 float t = f0 / (f0 - f1);
                 vec3 P = mix(p0, p1, t);
-                if (t < bestT && length(P.xz) >= 1.0 &&
+                if (t < bestT && length(P.xz) >= uGridP.x &&
                     abs(P.x) <= gExt && abs(P.z) <= gExt) {
                     // distance to the nearest grid line, and line width at this distance
                     vec2 g = abs(fract(P.xz / gS + 0.5) - 0.5) * gS;

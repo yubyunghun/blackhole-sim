@@ -178,6 +178,9 @@ struct KerrInfo {
 double   iscoOverM(double chi);        // prograde ISCO in units of M
 KerrInfo kerrInfo(double chi);
 double   ntFlux(double rOverM, double chi);   // Novikov-Thorne flux (arbitrary units)
+// Height of the Kerr equatorial embedding diagram at Boyer-Lindquist radius r
+// (rs units), measured from the horizon. a = 0 gives Flamm's 2 sqrt(r - 1).
+double   kerrEmbeddingHeight(double r, double chi);
 
 // Static-observer tetrad at the camera, in local Kerr-Schild coordinates
 // (t, X, Y, Z) with the spin axis along Z, for integration spin A (the shader
