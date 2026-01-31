@@ -14,10 +14,14 @@ $build = Join-Path $root "build-release"
 $stage = Join-Path $root "dist\blackhole-sim-$Version-win64"
 $zip   = "$stage.zip"
 
-# Prefer Ninja (uses whatever compiler the prompt set up). Otherwise use the
-# Visual Studio generator, forced to x64: the bundled GLFW libraries are x64,
-# and on ARM64 Windows the generator would default to ARM64.
-if (Get-Command ninja -ErrorAction SilentlyContinue) { $gen = @("-G", "Ninja") } else { $gen = @("-A", "x64") }
+# Use Ninja only inside a VS developer prompt (cl.exe on PATH); Ninja doesn't
+# set up the MSVC environment itself (e.g. on GitHub's runners, which have
+# Ninja but no dev prompt). Otherwise use the Visual Studio generator, forced
+# to x64: the bundled GLFW libraries are x64, and on ARM64 Windows the
+# generator would default to ARM64.
+$haveNinja = Get-Command ninja -ErrorAction SilentlyContinue
+$haveCl    = Get-Command cl    -ErrorAction SilentlyContinue
+if ($haveNinja -and $haveCl) { $gen = @("-G", "Ninja") } else { $gen = @("-A", "x64") }
 cmake -S $root -B $build @gen -DCMAKE_BUILD_TYPE=Release -DBH_STATIC_RUNTIME=ON
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 cmake --build $build --config Release
